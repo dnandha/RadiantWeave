@@ -1,6 +1,7 @@
 import React from "react";
 
 export type DrawMode =
+  | "cursor"
   | "create-room"
   | "create-zone"
   | "edit-rooms"
@@ -10,6 +11,7 @@ export type DrawMode =
   | "move-inlet";
 
 const MODES: { value: DrawMode; label: string }[] = [
+  { value: "cursor", label: "👆" },
   { value: "create-room", label: "Create rooms" },
   { value: "create-zone", label: "Create zones" },
   { value: "edit-rooms", label: "Edit rooms" },

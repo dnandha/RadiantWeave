@@ -1,5 +1,5 @@
 import React, { ChangeEvent, useEffect, useRef, useState } from "react";
-import { FloorplanCanvas } from "./components/FloorplanCanvas";
+import { FloorplanCanvas, type FloorplanCanvasHandle } from "./components/FloorplanCanvas";
 import { CircuitSummary, CircuitsTotalsCard } from "./components/CircuitSummary";
 import { DrawModeButtons, type DrawMode } from "./components/DrawModeButtons";
 import { HelpModal } from "./components/HelpModal";
@@ -63,6 +63,10 @@ type Layout = {
   floors: Floor[];
 };
 
+function addPoint(p: Point, delta: Point): Point {
+  return { x: p.x + delta.x, y: p.y + delta.y };
+}
+
 /** Length of a polyline in meters (sum of segment lengths). */
 function polylineLengthM(points: Point[]): number {
   let len = 0;
@@ -80,6 +84,16 @@ function snapToOrthogonal(from: Point, to: Point): Point {
   const dy = Math.abs(to.y - from.y);
   return dx <= dy ? { x: from.x, y: to.y } : { x: to.x, y: from.y };
 }
+
+/** Snap a point to a grid in meters (e.g. 0.005 for 5mm) so connection lines can run parallel at fixed spacing. */
+function snapToGrid(p: Point, gridM: number): Point {
+  return {
+    x: Math.round(p.x / gridM) * gridM,
+    y: Math.round(p.y / gridM) * gridM
+  };
+}
+
+const CONNECTION_GRID_M = 0.05; /* 5cm – minimum spacing between connection lines */
 
 /** Subzone rectangle (4 corners) for a zone split into n strips. Matches backend split_zone_into_subzones. */
 function getSubzoneRect(zonePoints: Point[], subzoneIndex: number, n: number): Point[] {
@@ -139,7 +153,7 @@ export const App: React.FC = () => {
   const [currentFloorId, setCurrentFloorId] = useState<string>("floor-1");
   const [draftRoom, setDraftRoom] = useState<Room | null>(null);
   const [draftZone, setDraftZone] = useState<Zone | null>(null);
-  const [drawMode, setDrawMode] = useState<DrawMode>("create-room");
+  const [drawMode, setDrawMode] = useState<DrawMode>("cursor");
   const [dragState, setDragState] = useState<
     | { type: "room"; id: string; startMouse: Point; originalPoints: Point[] }
     | { type: "zone"; id: string; startMouse: Point; originalPoints: Point[] }
@@ -154,6 +168,7 @@ export const App: React.FC = () => {
   } | null>(null);
   const [pipeSpacingM, setPipeSpacingM] = useState<number>(0.10);
   const [maxCircuitLengthM, setMaxCircuitLengthM] = useState<number>(60);
+  const canvasRef = useRef<FloorplanCanvasHandle>(null);
   const [manifoldEditingKey, setManifoldEditingKey] = useState<"x" | "y" | null>(
     null
   );
@@ -164,6 +179,9 @@ export const App: React.FC = () => {
   } | null>(null);
   const lastCanvasClickTimeRef = useRef(0);
   const [showHelpModal, setShowHelpModal] = useState(false);
+  const [editingFloor, setEditingFloor] = useState<{ id: string; name: string } | null>(null);
+  const editingFloorInputRef = useRef<HTMLInputElement>(null);
+  const [floorToDelete, setFloorToDelete] = useState<string | null>(null);
 
   const currentFloor = React.useMemo(
     () => floors.find((f) => f.id === currentFloorId) ?? floors[0]!,
@@ -185,6 +203,71 @@ export const App: React.FC = () => {
     },
     [currentFloorId]
   );
+
+  React.useEffect(() => {
+    if (editingFloor) editingFloorInputRef.current?.focus();
+  }, [editingFloor]);
+
+  const commitFloorRename = (id: string, name: string) => {
+    const trimmed = name.trim();
+    if (trimmed) {
+      setFloors((prev) =>
+        prev.map((f) => (f.id === id ? { ...f, name: trimmed } : f))
+      );
+    }
+    setEditingFloor(null);
+  };
+
+  const applyOffsetToCurrentFloor = React.useCallback(
+    (offset: Point) => {
+      setFloors((prev) =>
+        prev.map((f) => {
+          if (f.id !== currentFloorId) return f;
+          return {
+            ...f,
+            rooms: f.rooms.map((r) => ({
+              ...r,
+              points: r.points.map((p) => addPoint(p, offset))
+            })),
+            zones: f.zones.map((z) => ({
+              ...z,
+              points: z.points.map((p) => addPoint(p, offset))
+            })),
+            manifoldPosition: f.manifoldPosition
+              ? addPoint(f.manifoldPosition, offset)
+              : null,
+            manifoldConnections: f.manifoldConnections.map((c) => ({
+              ...c,
+              points: c.points.map((p) => addPoint(p, offset))
+            })),
+            circuitInletOverrides: Object.fromEntries(
+              Object.entries(f.circuitInletOverrides).map(([id, p]) => [
+                id,
+                addPoint(p, offset)
+              ])
+            ),
+            paths: f.paths.map((path) => ({
+              ...path,
+              points: path.points.map((p) => addPoint(p, offset))
+            }))
+          };
+        })
+      );
+    },
+    [currentFloorId]
+  );
+
+  const handleCenterPlan = () => {
+    const result = canvasRef.current?.getCenterPlanOffset();
+    if (result) {
+      applyOffsetToCurrentFloor(result.offset);
+      canvasRef.current?.resetPan();
+      setDraftRoom(null);
+      setDraftZone(null);
+      setConnectionDrawing(null);
+    }
+  };
+
   const setRooms = (updater: Room[] | ((prev: Room[]) => Room[])) => {
     updateCurrentFloor({
       rooms: typeof updater === "function" ? updater(rooms) : updater
@@ -272,29 +355,31 @@ export const App: React.FC = () => {
             setCurrentFloorId(parsed.floors[0].id);
           }
         } else if (Array.isArray(parsed.rooms)) {
-          // Migrate old layout: single floor from top-level rooms/zones
-          setFloors([
-            {
-              id: "floor-1",
-              name: "Ground floor",
-              rooms: parsed.rooms,
-              zones: Array.isArray(parsed.zones) ? parsed.zones : [],
-              manifoldPosition: parsed.manifoldPosition ?? null,
-              manifoldConnections: Array.isArray(parsed.manifoldConnections)
-                ? parsed.manifoldConnections.map((c: any) => ({
-                    circuitId: c.circuitId,
-                    points: c.points ?? []
-                  }))
-                : [],
-              circuitInletOverrides:
-                parsed.circuitInletOverrides && typeof parsed.circuitInletOverrides === "object"
-                  ? parsed.circuitInletOverrides
-                  : {},
-              circuits: [],
-              paths: []
-            }
-          ]);
-          setCurrentFloorId("floor-1");
+          // Legacy layout (no floors): assign to current floor (initial load = floor-1)
+          const currentId = "floor-1";
+          const legacyFloorPatch = {
+            rooms: parsed.rooms,
+            zones: Array.isArray(parsed.zones) ? parsed.zones : [],
+            manifoldPosition: parsed.manifoldPosition ?? null,
+            manifoldConnections: Array.isArray(parsed.manifoldConnections)
+              ? parsed.manifoldConnections.map((c: any) => ({
+                  circuitId: c.circuitId,
+                  points: c.points ?? []
+                }))
+              : [],
+            circuitInletOverrides:
+              parsed.circuitInletOverrides && typeof parsed.circuitInletOverrides === "object"
+                ? parsed.circuitInletOverrides
+                : {},
+            circuits: [] as CircuitRow[],
+            paths: [] as CircuitPath[]
+          };
+          setFloors((prev) =>
+            prev.some((f) => f.id === currentId)
+              ? prev.map((f) => (f.id === currentId ? { ...f, ...legacyFloorPatch } : f))
+              : [...prev, { id: currentId, name: "Ground floor", ...legacyFloorPatch }]
+          );
+          setCurrentFloorId(currentId);
         }
       }
     } catch {
@@ -429,7 +514,7 @@ export const App: React.FC = () => {
   const handleConnectionAddPoint = (pointMeters: Point) => {
     if (!connectionDrawing || connectionDrawing.points.length < 1) return;
     const last = connectionDrawing.points[connectionDrawing.points.length - 1]!;
-    const toAdd = snapToOrthogonal(last, pointMeters);
+    const toAdd = snapToGrid(snapToOrthogonal(last, pointMeters), CONNECTION_GRID_M);
     setConnectionDrawing({
       ...connectionDrawing,
       points: [...connectionDrawing.points, toAdd]
@@ -869,6 +954,7 @@ export const App: React.FC = () => {
   const handleLoadLayout = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    const currentId = currentFloorId;
     const reader = new FileReader();
     reader.onload = () => {
       try {
@@ -908,10 +994,89 @@ export const App: React.FC = () => {
               : parsed.floors[0].id
           );
         } else if (Array.isArray(parsed.rooms)) {
-          setFloors([
+          // Legacy layout (no floors): assign to current floor
+          const legacyFloorPatch = {
+            rooms: parsed.rooms,
+            zones: Array.isArray(parsed.zones) ? parsed.zones : [],
+            manifoldPosition: parsed.manifoldPosition ?? null,
+            manifoldConnections: Array.isArray(parsed.manifoldConnections)
+              ? parsed.manifoldConnections.map((c: any) => ({ circuitId: c.circuitId, points: c.points ?? [] }))
+              : [],
+            circuitInletOverrides:
+              parsed.circuitInletOverrides && typeof parsed.circuitInletOverrides === "object"
+                ? parsed.circuitInletOverrides
+                : {},
+            circuits: [] as CircuitRow[],
+            paths: [] as CircuitPath[]
+          };
+          setFloors((prev) => {
+            const hasCurrent = prev.some((f) => f.id === currentId);
+            if (!hasCurrent) {
+              return [...prev, { id: currentId, name: "Floor", ...legacyFloorPatch }];
+            }
+            return prev.map((f) =>
+              f.id === currentId ? { ...f, ...legacyFloorPatch } : f
+            );
+          });
+        }
+      } catch {
+        // ignore parse errors
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  const loadAsFloorInputRef = useRef<HTMLInputElement>(null);
+
+  const handleLoadAsFloor = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result)) as Layout & {
+          rooms?: Room[];
+          zones?: Zone[];
+          manifoldPosition?: Point | null;
+          manifoldConnections?: ManifoldConnection[];
+          circuitInletOverrides?: Record<string, Point>;
+        };
+        if (!parsed) return;
+        setDraftRoom(null);
+        setDraftZone(null);
+        setConnectionDrawing(null);
+        if (Array.isArray(parsed.floors) && parsed.floors.length > 0) {
+          const baseId = `floor-${Date.now()}`;
+          let firstNewId: string | null = null;
+          setFloors((prev) => {
+            const newFloors: Floor[] = parsed.floors.map((f: any, i: number) => ({
+              id: `${baseId}-${i}`,
+              name: f.name ?? `Floor ${prev.length + i + 1}`,
+              rooms: Array.isArray(f.rooms) ? f.rooms : [],
+              zones: Array.isArray(f.zones) ? f.zones : [],
+              manifoldPosition: f.manifoldPosition ?? null,
+              manifoldConnections: Array.isArray(f.manifoldConnections)
+                ? f.manifoldConnections.map((c: any) => ({ circuitId: c.circuitId, points: c.points ?? [] }))
+                : [],
+              circuitInletOverrides:
+                f.circuitInletOverrides && typeof f.circuitInletOverrides === "object"
+                  ? f.circuitInletOverrides
+                  : {},
+              circuits: Array.isArray(f.circuits) ? f.circuits : [],
+              paths: Array.isArray(f.paths) ? f.paths : []
+            }));
+            firstNewId = newFloors[0]!.id;
+            return [...prev, ...newFloors];
+          });
+          if (firstNewId) setCurrentFloorId(firstNewId);
+        } else if (Array.isArray(parsed.rooms)) {
+          const id = `floor-${Date.now()}`;
+          setFloors((prev) => [
+            ...prev,
             {
-              id: "floor-1",
-              name: "Ground floor",
+              id,
+              name: `Floor ${prev.length + 1}`,
               rooms: parsed.rooms,
               zones: Array.isArray(parsed.zones) ? parsed.zones : [],
               manifoldPosition: parsed.manifoldPosition ?? null,
@@ -926,7 +1091,7 @@ export const App: React.FC = () => {
               paths: []
             }
           ]);
-          setCurrentFloorId("floor-1");
+          setCurrentFloorId(id);
         }
       } catch {
         // ignore parse errors
@@ -1162,6 +1327,22 @@ export const App: React.FC = () => {
     setCornerDragState(null);
   };
 
+  const handleDeleteFloor = (floorId: string) => {
+    if (floors.length <= 1) return;
+    const index = floors.findIndex((f) => f.id === floorId);
+    if (index === -1) return;
+    setFloors((prev) => prev.filter((f) => f.id !== floorId));
+    if (currentFloorId === floorId) {
+      const remaining = floors.filter((f) => f.id !== floorId);
+      const nextIndex = Math.min(index, remaining.length - 1);
+      setCurrentFloorId(remaining[Math.max(0, nextIndex)]!.id);
+    }
+    setEditingFloor((prev) => (prev?.id === floorId ? null : prev));
+    setDraftRoom(null);
+    setDraftZone(null);
+    setConnectionDrawing(null);
+  };
+
   const pipeSpacingByZoneId: Record<string, number> = {};
   zones.forEach((z) => {
     if (z.pipeSpacingM != null) pipeSpacingByZoneId[z.id] = z.pipeSpacingM;
@@ -1193,6 +1374,47 @@ export const App: React.FC = () => {
         </div>
       </header>
       {showHelpModal && <HelpModal onClose={() => setShowHelpModal(false)} />}
+      {floorToDelete && (() => {
+        const floor = floors.find((f) => f.id === floorToDelete);
+        if (!floor) return null;
+        return (
+          <div
+            className="help-modal-overlay"
+            onClick={() => setFloorToDelete(null)}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-delete-floor-title"
+          >
+            <div className="confirm-modal" onClick={(e) => e.stopPropagation()}>
+              <h2 id="confirm-delete-floor-title" className="confirm-modal-title">
+                Delete floor?
+              </h2>
+              <p className="confirm-modal-body">
+                Delete &quot;{floor.name}&quot;? This cannot be undone.
+              </p>
+              <div className="confirm-modal-actions">
+                <button
+                  type="button"
+                  className="confirm-modal-btn confirm-modal-btn--cancel"
+                  onClick={() => setFloorToDelete(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="confirm-modal-btn confirm-modal-btn--danger"
+                  onClick={() => {
+                    handleDeleteFloor(floorToDelete);
+                    setFloorToDelete(null);
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       <div className="app-toolbar">
         <div className="app-toolbar-row">
@@ -1205,38 +1427,77 @@ export const App: React.FC = () => {
               <span>Load layout:</span>
               <input type="file" accept="application/json" onChange={handleLoadLayout} />
             </label>
+            <button
+              type="button"
+              onClick={() => loadAsFloorInputRef.current?.click()}
+              title="Load a layout file as a new floor"
+            >
+              Load as floor
+            </button>
+            <input
+              ref={loadAsFloorInputRef}
+              type="file"
+              accept="application/json"
+              onChange={handleLoadAsFloor}
+              style={{ display: "none" }}
+              aria-hidden
+            />
           </div>
         </div>
         <div className="app-toolbar-row">
           <span className="app-toolbar-row__label">Floor</span>
           <div className="app-toolbar-group app-toolbar-floors">
             {floors.map((f) => (
-              <button
-                key={f.id}
-                type="button"
-                onClick={() => handleSwitchFloor(f.id)}
-                className={f.id === currentFloorId ? "floor-tab floor-tab--active" : "floor-tab"}
-              >
-                {f.name}
-              </button>
+              <span key={f.id} className="floor-tab-wrap">
+                {editingFloor?.id === f.id ? (
+                  <input
+                    ref={editingFloorInputRef}
+                    type="text"
+                    className={`floor-tab floor-tab--input ${f.id === currentFloorId ? "floor-tab--active" : ""}`}
+                    value={editingFloor.name}
+                    onChange={(e) => setEditingFloor((prev) => (prev ? { ...prev, name: e.target.value } : null))}
+                    onBlur={() => editingFloor && commitFloorRename(editingFloor.id, editingFloor.name)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        editingFloor && commitFloorRename(editingFloor.id, editingFloor.name);
+                      } else if (e.key === "Escape") {
+                        setEditingFloor(null);
+                      }
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleSwitchFloor(f.id)}
+                    onDoubleClick={(e) => {
+                      e.preventDefault();
+                      setEditingFloor({ id: f.id, name: f.name });
+                    }}
+                    className={f.id === currentFloorId ? "floor-tab floor-tab--active" : "floor-tab"}
+                  >
+                    {f.name}
+                  </button>
+                )}
+                {floors.length > 1 && (
+                  <button
+                    type="button"
+                    className="floor-tab-delete"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setFloorToDelete(f.id);
+                    }}
+                    title={`Delete ${f.name}`}
+                    aria-label={`Delete ${f.name}`}
+                  >
+                    ×
+                  </button>
+                )}
+              </span>
             ))}
             <button type="button" onClick={handleAddFloor} className="floor-add">
               + Add floor
             </button>
-          </div>
-        </div>
-        <div className="app-toolbar-row">
-          <span className="app-toolbar-row__label">Scale</span>
-          <div className="app-toolbar-group">
-            <label>
-              <span>Pixels per meter:</span>
-              <input
-                type="number"
-                value={pixelsPerMeter}
-                min={1}
-                onChange={handlePixelsPerMeterChange}
-              />
-            </label>
           </div>
         </div>
         <div className="app-toolbar-row">
@@ -1258,7 +1519,6 @@ export const App: React.FC = () => {
 
       <div className="app-draw-toolbar">
         <div className="app-toolbar-row">
-          <span className="app-toolbar-row__label">Draw</span>
           <div className="app-toolbar-group">
             <DrawModeButtons value={drawMode} onChange={setDrawMode} />
           </div>
@@ -1277,8 +1537,34 @@ export const App: React.FC = () => {
       </div>
 
       <main className="app-main">
-        <section className="app-canvas-wrapper">
-          <FloorplanCanvas
+        <div className="app-canvas-column">
+          <div className="panel app-scale-card">
+            <div className="app-toolbar-row">
+              <span className="app-toolbar-row__label">Scale</span>
+              <div className="app-toolbar-group">
+                <label>
+                  <span>Pixels per meter:</span>
+                  <input
+                    type="number"
+                    value={pixelsPerMeter}
+                    min={1}
+                    onChange={handlePixelsPerMeterChange}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="draw-action-btn"
+                  onClick={handleCenterPlan}
+                  title="Move the plan to center"
+                >
+                  Center
+                </button>
+              </div>
+            </div>
+          </div>
+          <section className="app-canvas-wrapper">
+            <FloorplanCanvas
+          ref={canvasRef}
           circuits={paths}
           rooms={rooms}
           zones={zones}
@@ -1358,8 +1644,10 @@ export const App: React.FC = () => {
           onInletOverrideChange={
             drawMode === "move-inlet" ? handleInletOverrideChange : undefined
           }
+          connectionGridM={CONNECTION_GRID_M}
         />
-        </section>
+          </section>
+        </div>
 
         <aside className="app-sidebar">
           <button
@@ -1414,7 +1702,7 @@ export const App: React.FC = () => {
               </span>
             </div>
             {drawMode === "add-connection" && (
-              <p style={{ fontSize: 12, color: "#64748b", marginTop: 4 }}>
+              <p style={{ color: "#64748b", marginTop: 4 }}>
                 Start at the manifold (red) or a circuit inlet (white circle).
                 Add path points, then finish at an inlet or the manifold. Esc to
                 cancel.
@@ -1442,7 +1730,7 @@ export const App: React.FC = () => {
                         borderBottom: "1px solid #eee"
                       }}
                     >
-                      <span style={{ fontSize: 13 }}>{circuitName}</span>
+                      <span>{circuitName}</span>
                       <button
                         type="button"
                         onClick={() =>
@@ -1450,7 +1738,7 @@ export const App: React.FC = () => {
                             prev.filter((c) => c.circuitId !== conn.circuitId)
                           )
                         }
-                        style={{ fontSize: 11, padding: "2px 6px" }}
+                        style={{ padding: "2px 6px" }}
                       >
                         Delete
                       </button>

@@ -1,4 +1,4 @@
-import React, { MouseEvent, useEffect, useRef, useState } from "react";
+import React, { forwardRef, MouseEvent, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 
 type Point = { x: number; y: number };
 
@@ -54,17 +54,31 @@ type Props = {
   /** Per-circuit 4-point rect to constrain inlet to (subzone or zone border). */
   circuitIdToInletConstraintRect?: Record<string, Point[]>;
   onInletOverrideChange?: (circuitId: string, point: Point) => void;
+  /** Grid step in meters for connection waypoints (e.g. 0.05 for 5cm spacing). */
+  connectionGridM?: number;
+};
+
+export type FloorplanCanvasHandle = {
+  getCenterPlanOffset: () => { offset: Point } | null;
+  resetPan: () => void;
 };
 
 const HANDLE_R = 6;
 const CONNECTION_POINT_R = 5;
-const CONNECTION_HIT_M = 0.25;
+const CONNECTION_HIT_M = 0.10; /* only snap to manifold/inlet when click is very close; otherwise add waypoint */
 
 /** Snap a free point to the only orthogonal option from `from`: either (from.x, to.y) or (to.x, from.y), whichever is closer to `to`. */
 function snapToOrthogonal(from: Point, to: Point): Point {
   const dx = Math.abs(to.x - from.x);
   const dy = Math.abs(to.y - from.y);
   return dx <= dy ? { x: from.x, y: to.y } : { x: to.x, y: from.y };
+}
+
+function snapToGrid(p: Point, gridM: number): Point {
+  return {
+    x: Math.round(p.x / gridM) * gridM,
+    y: Math.round(p.y / gridM) * gridM
+  };
 }
 
 /** Closest point on the rectangle perimeter (4 edges). `rect` has at least 4 corners in order. */
@@ -88,7 +102,7 @@ function closestPointOnRectPerimeter(rect: Point[], p: Point): Point {
   return best;
 }
 
-export const FloorplanCanvas: React.FC<Props> = ({
+export const FloorplanCanvas = forwardRef<FloorplanCanvasHandle, Props>(function FloorplanCanvas({
   floorplanImageUrl,
   circuits,
   rooms,
@@ -116,8 +130,9 @@ export const FloorplanCanvas: React.FC<Props> = ({
   circuitInletOverrides = {},
   circuitIdToZoneId = {},
   circuitIdToInletConstraintRect = {},
-  onInletOverrideChange
-}) => {
+  onInletOverrideChange,
+  connectionGridM = 0.05
+}, ref) {
   const isEditRooms = drawMode === "edit-rooms";
   const isEditZones = drawMode === "edit-zones";
   const isAddConnection = drawMode === "add-connection";
@@ -125,6 +140,7 @@ export const FloorplanCanvas: React.FC<Props> = ({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [cursorMeters, setCursorMeters] = useState<Point | null>(null);
   const [inletDrag, setInletDrag] = useState<{ circuitId: string } | null>(null);
+  const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
 
   useEffect(() => {
     if (!inletDrag) return;
@@ -140,13 +156,71 @@ export const FloorplanCanvas: React.FC<Props> = ({
   const toPoint = (clientX: number, clientY: number): Point | null => {
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return null;
-    const xPx = clientX - rect.left;
-    const yPx = clientY - rect.top;
+    const xPx = clientX - rect.left - pan.x;
+    const yPx = clientY - rect.top - pan.y;
     return {
       x: xPx / pixelsPerMeter,
       y: yPx / pixelsPerMeter
     };
   };
+
+  const getContentBoundsMeters = (): { minX: number; minY: number; maxX: number; maxY: number } | null => {
+    const allPoints: Point[] = [];
+    for (const r of rooms) allPoints.push(...r.points);
+    for (const z of zones) allPoints.push(...z.points);
+    for (const c of circuits) allPoints.push(...c.points);
+    if (manifoldPosition) allPoints.push(manifoldPosition);
+    if (tempRoom) allPoints.push(...tempRoom.points);
+    if (tempZone) allPoints.push(...tempZone.points);
+    if (connectionDrawing) allPoints.push(...connectionDrawing);
+    for (const conn of manifoldConnections) allPoints.push(...conn.points);
+    if (allPoints.length === 0) return null;
+    const xs = allPoints.map((p) => p.x);
+    const ys = allPoints.map((p) => p.y);
+    return {
+      minX: Math.min(...xs),
+      minY: Math.min(...ys),
+      maxX: Math.max(...xs),
+      maxY: Math.max(...ys)
+    };
+  };
+
+  const getCenterPlanOffset = (): { offset: Point } | null => {
+    const el = containerRef.current;
+    const bounds = getContentBoundsMeters();
+    if (!el || !bounds) return null;
+    const rect = el.getBoundingClientRect();
+    const viewportCenterMeters: Point = {
+      x: rect.width / 2 / pixelsPerMeter,
+      y: rect.height / 2 / pixelsPerMeter
+    };
+    const contentCenterMeters: Point = {
+      x: (bounds.minX + bounds.maxX) / 2,
+      y: (bounds.minY + bounds.maxY) / 2
+    };
+    return {
+      offset: {
+        x: viewportCenterMeters.x - contentCenterMeters.x,
+        y: viewportCenterMeters.y - contentCenterMeters.y
+      }
+    };
+  };
+
+  const resetPan = () => setPan({ x: 0, y: 0 });
+
+  useImperativeHandle(ref, () => ({ getCenterPlanOffset, resetPan }), [getCenterPlanOffset]);
+
+  const contentHeightPx = useMemo(() => {
+    const bounds = getContentBoundsMeters();
+    if (!bounds) return null;
+    return (bounds.maxY - bounds.minY) * pixelsPerMeter;
+  }, [rooms, zones, circuits, manifoldPosition, tempRoom, tempZone, connectionDrawing, manifoldConnections, pixelsPerMeter]);
+
+  const canvasMinHeight = 600;
+  const canvasHeight =
+    contentHeightPx != null && contentHeightPx > 0
+      ? `max(80vh, ${canvasMinHeight}px, ${contentHeightPx + 80}px)`
+      : `max(80vh, ${canvasMinHeight}px)`;
 
   const handleClick = (e: MouseEvent<HTMLDivElement>) => {
     const p = toPoint(e.clientX, e.clientY);
@@ -237,8 +311,8 @@ export const FloorplanCanvas: React.FC<Props> = ({
       style={{
         border: "1px solid #ddd",
         position: "relative",
-        height: "80vh",
-        minHeight: 600
+        minHeight: canvasMinHeight,
+        height: canvasHeight
       }}
       ref={containerRef}
       onClick={handleClick}
@@ -262,6 +336,7 @@ export const FloorplanCanvas: React.FC<Props> = ({
           overflow: "visible"
         }}
       >
+        <g transform={`translate(${pan.x}, ${pan.y})`}>
         {manifoldPosition && (
           <circle
             cx={manifoldPosition.x * pixelsPerMeter}
@@ -303,7 +378,7 @@ export const FloorplanCanvas: React.FC<Props> = ({
                   x={labelX}
                   y={labelY}
                   textAnchor="end"
-                  fontSize={12}
+                  fontSize={14}
                   fill="#264653"
                 >
                   {room.name}
@@ -369,7 +444,7 @@ export const FloorplanCanvas: React.FC<Props> = ({
                   x={labelX}
                   y={labelY}
                   textAnchor="end"
-                  fontSize={11}
+                  fontSize={14}
                   fill="#2a9d8f"
                 >
                   {zone.name}
@@ -475,22 +550,21 @@ export const FloorplanCanvas: React.FC<Props> = ({
               strokeDasharray="4 2"
               fill="none"
             />
-            {cursorMeters && (
-              <path
-                d={toSvgPath([
-                  connectionDrawing[connectionDrawing.length - 1]!,
-                  snapToOrthogonal(
-                    connectionDrawing[connectionDrawing.length - 1]!,
-                    cursorMeters
-                  )
-                ])}
-                stroke="#334155"
-                strokeWidth={2.5}
-                strokeDasharray="2 2"
-                fill="none"
-                opacity={0.95}
-              />
-            )}
+            {cursorMeters && (() => {
+              const last = connectionDrawing[connectionDrawing.length - 1]!;
+              const orth = snapToOrthogonal(last, cursorMeters);
+              const previewEnd = connectionGridM > 0 ? snapToGrid(orth, connectionGridM) : orth;
+              return (
+                <path
+                  d={toSvgPath([last, previewEnd])}
+                  stroke="#334155"
+                  strokeWidth={2.5}
+                  strokeDasharray="2 2"
+                  fill="none"
+                  opacity={0.95}
+                />
+              );
+            })()}
           </>
         )}
         {circuits.map((circuit, index) => {
@@ -537,9 +611,10 @@ export const FloorplanCanvas: React.FC<Props> = ({
             </g>
           );
         })}
+        </g>
       </svg>
     </div>
   );
-};
+});
 
 

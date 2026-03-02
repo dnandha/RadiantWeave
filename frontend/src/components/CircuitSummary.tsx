@@ -42,7 +42,7 @@ function totalLengthWithConnections(
     connectionLengthByCircuitId[conn.circuitId] = polylineLengthM(conn.points);
   });
   const totalLengthM = (c: CircuitRow) =>
-    c.lengthM + (connectionLengthByCircuitId[c.id] ?? 0);
+    c.lengthM + 2 * (connectionLengthByCircuitId[c.id] ?? 0);
   return circuits.reduce((sum, c) => sum + totalLengthM(c), 0);
 }
 
@@ -71,7 +71,7 @@ export const CircuitSummary: React.FC<Props> = ({
     connectionLengthByCircuitId[conn.circuitId] = polylineLengthM(conn.points);
   });
   const totalLengthM = (c: CircuitRow) =>
-    c.lengthM + (connectionLengthByCircuitId[c.id] ?? 0);
+    c.lengthM + 2 * (connectionLengthByCircuitId[c.id] ?? 0);
 
   // Group circuits by zone, then by subzone for "Subzones per zone" section
   const zonesWithSubzones = circuits.reduce<
