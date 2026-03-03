@@ -17,6 +17,7 @@ type CircuitRow = {
 
 type ManifoldConnection = {
   circuitId: string;
+  manifoldId?: string;
   points: Point[];
 };
 
@@ -30,9 +31,13 @@ function polylineLengthM(points: Point[]): number {
   return len;
 }
 
+type ManifoldItem = { id: string; name?: string };
+
 type Props = {
   circuits: CircuitRow[];
   manifoldConnections?: ManifoldConnection[];
+  /** Manifolds on this floor; used for per-manifold totals. */
+  manifolds?: ManifoldItem[];
 };
 
 function totalLengthWithConnections(
@@ -50,16 +55,69 @@ function totalLengthWithConnections(
 
 export const CircuitsTotalsCard: React.FC<Props> = ({
   circuits,
-  manifoldConnections = []
+  manifoldConnections = [],
+  manifolds = []
 }) => {
   if (circuits.length === 0) return null;
-  const totalLength = totalLengthWithConnections(circuits, manifoldConnections);
+  const connectionLengthByCircuitId: Record<string, number> = {};
+  manifoldConnections.forEach((conn) => {
+    connectionLengthByCircuitId[conn.circuitId] = polylineLengthM(conn.points);
+  });
+  const totalLengthM = (c: CircuitRow) =>
+    c.lengthM + 2 * (connectionLengthByCircuitId[c.id] ?? 0);
+  const totalLength = circuits.reduce((sum, c) => sum + totalLengthM(c), 0);
+
+  const circuitIdToManifoldId: Record<string, string> = {};
+  manifoldConnections.forEach((conn) => {
+    if (conn.manifoldId) circuitIdToManifoldId[conn.circuitId] = conn.manifoldId;
+  });
+
+  const perManifold: { manifoldId: string; label: string; count: number; lengthM: number }[] = [];
+  for (const m of manifolds) {
+    const circuitIds = Object.entries(circuitIdToManifoldId)
+      .filter(([, mid]) => mid === m.id)
+      .map(([cid]) => cid);
+    const set = new Set(circuitIds);
+    const list = circuits.filter((c) => set.has(c.id));
+    const lengthM = list.reduce((sum, c) => sum + totalLengthM(c), 0);
+    perManifold.push({
+      manifoldId: m.id,
+      label: m.name ?? m.id,
+      count: list.length,
+      lengthM
+    });
+  }
+  const connectedIds = new Set(Object.keys(circuitIdToManifoldId));
+  const unassignedCount = circuits.filter((c) => !connectedIds.has(c.id)).length;
+  const unassignedLength = circuits
+    .filter((c) => !connectedIds.has(c.id))
+    .reduce((sum, c) => sum + totalLengthM(c), 0);
+  const hasUnassigned = unassignedCount > 0;
+
   return (
     <div className="panel circuits-totals-card">
       <div className="circuits-totals-card__row">
         <span><strong>Total circuits:</strong> {circuits.length}</span>
         <span><strong>Total length:</strong> {totalLength.toFixed(1)} m</span>
       </div>
+      {(perManifold.some((p) => p.count > 0) || hasUnassigned) && (
+        <div className="circuits-totals-card__per-manifold" style={{ marginTop: 8, fontSize: "0.85rem" }}>
+          {perManifold.map((p) => (
+            p.count > 0 ? (
+              <div key={p.manifoldId} className="circuits-totals-card__row">
+                <span>{p.label}:</span>
+                <span>{p.count} circuits, {p.lengthM.toFixed(1)} m</span>
+              </div>
+            ) : null
+          ))}
+          {hasUnassigned && (
+            <div className="circuits-totals-card__row">
+              <span>No connection:</span>
+              <span>{unassignedCount} circuits, {unassignedLength.toFixed(1)} m</span>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };

@@ -1,4 +1,4 @@
-import React, { ChangeEvent, useState } from "react";
+import React, { ChangeEvent, useEffect, useRef, useState } from "react";
 import type { ShapeSummary } from "./ShapeListPanel";
 import { ActionsMenu } from "./ActionsMenu";
 
@@ -9,6 +9,7 @@ type Props = {
   defaultPipeSpacingM: number;
   onDimensionChange: (zoneId: string, field: "width" | "height", value: number) => void;
   onPipeSpacingChange: (zoneId: string, value: number) => void;
+  onRename?: (zoneId: string, name: string) => void;
   onClone?: (zoneId: string) => void;
   onDelete?: (zoneId: string) => void;
   onExpand?: (zoneId: string) => void;
@@ -25,6 +26,7 @@ export const ZonesPanel: React.FC<Props> = ({
   defaultPipeSpacingM,
   onDimensionChange,
   onPipeSpacingChange,
+  onRename,
   onClone,
   onDelete,
   onExpand,
@@ -36,6 +38,12 @@ export const ZonesPanel: React.FC<Props> = ({
 }) => {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState("");
+  const [editingNameId, setEditingNameId] = useState<string | null>(null);
+  const [editingNameValue, setEditingNameValue] = useState("");
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (editingNameId) nameInputRef.current?.focus();
+  }, [editingNameId]);
 
   return (
     <div>
@@ -63,7 +71,49 @@ export const ZonesPanel: React.FC<Props> = ({
               const pipeSpacing = pipeSpacingByZoneId[z.id] ?? defaultPipeSpacingM;
               return (
               <tr key={z.id}>
-                <td className="panel-name-cell">{z.name}</td>
+                <td className="panel-name-cell">
+                  {editingNameId === z.id ? (
+                    <input
+                      ref={nameInputRef}
+                      type="text"
+                      value={editingNameValue}
+                      onChange={(e) => setEditingNameValue(e.target.value)}
+                      onBlur={() => {
+                        if (onRename && editingNameId === z.id) {
+                          const trimmed = editingNameValue.trim();
+                          if (trimmed) onRename(z.id, trimmed);
+                        }
+                        setEditingNameId(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          if (onRename && editingNameId === z.id) {
+                            const trimmed = editingNameValue.trim();
+                            if (trimmed) onRename(z.id, trimmed);
+                          }
+                          setEditingNameId(null);
+                        } else if (e.key === "Escape") {
+                          setEditingNameId(null);
+                        }
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                      style={{ width: "100%", minWidth: 60 }}
+                    />
+                  ) : (
+                    <span
+                      onDoubleClick={() => {
+                        if (onRename) {
+                          setEditingNameId(z.id);
+                          setEditingNameValue(z.name);
+                        }
+                      }}
+                      title={onRename ? "Double-click to rename" : undefined}
+                      style={{ cursor: onRename ? "text" : "default" }}
+                    >
+                      {z.name}
+                    </span>
+                  )}
+                </td>
                 <td align="right">
                   <input
                     type="number"

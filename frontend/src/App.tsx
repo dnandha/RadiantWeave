@@ -42,7 +42,16 @@ type Zone = {
 
 type ManifoldConnection = {
   circuitId: string;
+  /** Which manifold this connection goes to (optional for backward compat). */
+  manifoldId?: string;
   points: Point[];
+};
+
+/** A manifold on a floor (position and optional name). */
+type ManifoldItem = {
+  id: string;
+  position: Point;
+  name?: string;
 };
 
 type Floor = {
@@ -50,11 +59,14 @@ type Floor = {
   name: string;
   rooms: Room[];
   zones: Zone[];
-  manifoldPosition?: Point | null;
+  /** Multiple manifolds per floor. */
+  manifolds: ManifoldItem[];
   manifoldConnections: ManifoldConnection[];
   circuitInletOverrides: Record<string, Point>;
   circuits: CircuitRow[];
   paths: CircuitPath[];
+  /** Max circuit length in meters; used when calculating circuits for this floor. */
+  maxCircuitLengthM?: number;
 };
 
 type Layout = {
@@ -62,6 +74,23 @@ type Layout = {
   currentFloorId?: string;
   floors: Floor[];
 };
+
+/** Keep only the first zone per id when loading; avoids duplicate zone IDs. */
+function deduplicateZones(zones: Zone[]): Zone[] {
+  const seen = new Set<string>();
+  return zones.filter((z) => {
+    if (seen.has(z.id)) return false;
+    seen.add(z.id);
+    return true;
+  });
+}
+
+/** True if rect points are degenerate (all same point, zero area). */
+function isDegenerateRect(points: Point[]): boolean {
+  if (points.length < 4) return true;
+  const p0 = points[0]!;
+  return points.every((p) => p.x === p0.x && p.y === p0.y);
+}
 
 function addPoint(p: Point, delta: Point): Point {
   return { x: p.x + delta.x, y: p.y + delta.y };
@@ -137,11 +166,12 @@ function newFloor(id: string, name: string): Floor {
     name,
     rooms: [],
     zones: [],
-    manifoldPosition: null,
+    manifolds: [],
     manifoldConnections: [],
     circuitInletOverrides: {},
     circuits: [],
-    paths: []
+    paths: [],
+    maxCircuitLengthM: 60
   };
 }
 
@@ -167,16 +197,13 @@ export const App: React.FC = () => {
     originalPoints: Point[];
   } | null>(null);
   const [pipeSpacingM, setPipeSpacingM] = useState<number>(0.10);
-  const [maxCircuitLengthM, setMaxCircuitLengthM] = useState<number>(60);
   const canvasRef = useRef<FloorplanCanvasHandle>(null);
-  const [manifoldEditingKey, setManifoldEditingKey] = useState<"x" | "y" | null>(
-    null
-  );
-  const [manifoldEditingValue, setManifoldEditingValue] = useState("");
   const [connectionDrawing, setConnectionDrawing] = useState<{
     points: Point[];
     startCircuitId?: string;
+    startManifoldId?: string;
   } | null>(null);
+  const [draggingManifoldId, setDraggingManifoldId] = useState<string | null>(null);
   const lastCanvasClickTimeRef = useRef(0);
   const [showHelpModal, setShowHelpModal] = useState(false);
   const [editingFloor, setEditingFloor] = useState<{ id: string; name: string } | null>(null);
@@ -189,7 +216,7 @@ export const App: React.FC = () => {
   );
   const rooms = currentFloor.rooms;
   const zones = currentFloor.zones;
-  const manifoldPosition = currentFloor.manifoldPosition ?? null;
+  const manifolds = currentFloor.manifolds ?? [];
   const manifoldConnections = currentFloor.manifoldConnections;
   const circuitInletOverrides = currentFloor.circuitInletOverrides;
   const circuits = currentFloor.circuits;
@@ -208,20 +235,26 @@ export const App: React.FC = () => {
     if (editingFloor) editingFloorInputRef.current?.focus();
   }, [editingFloor]);
 
-  // Remove connections that don't have a valid inlet (circuit exists) or don't reach the manifold.
+  // Remove connections that don't have a valid inlet (circuit exists) or don't reach a manifold.
   React.useEffect(() => {
     const circuitIds = new Set(circuits.map((c) => c.id));
+    const manifoldIds = new Set(manifolds.map((m) => m.id));
     const MANIFOLD_HIT_M = 0.15;
-    const hasManifold = manifoldPosition != null;
+    const nearAnyManifold = (p: Point) =>
+      manifolds.some((m) => Math.hypot(p.x - m.position.x, p.y - m.position.y) <= MANIFOLD_HIT_M);
     const filtered = manifoldConnections.filter((conn) => {
       if (!circuitIds.has(conn.circuitId)) return false;
+      if (conn.manifoldId != null && !manifoldIds.has(conn.manifoldId)) return false;
       if (!conn.points?.length || conn.points.length < 2) return false;
-      if (hasManifold) {
+      if (manifolds.length > 0) {
         const first = conn.points[0]!;
         const last = conn.points[conn.points.length - 1]!;
-        const nearManifold = (p: Point) =>
-          Math.hypot(p.x - manifoldPosition!.x, p.y - manifoldPosition!.y) <= MANIFOLD_HIT_M;
-        if (!nearManifold(first) && !nearManifold(last)) return false;
+        if (conn.manifoldId) {
+          const m = manifolds.find((x) => x.id === conn.manifoldId);
+          if (!m) return false;
+          const near = (p: Point) => Math.hypot(p.x - m.position.x, p.y - m.position.y) <= MANIFOLD_HIT_M;
+          if (!near(first) && !near(last)) return false;
+        } else if (!nearAnyManifold(first) && !nearAnyManifold(last)) return false;
       }
       return true;
     });
@@ -231,7 +264,7 @@ export const App: React.FC = () => {
     if (!unchanged) {
       setManifoldConnections(filtered);
     }
-  }, [circuits, manifoldPosition, manifoldConnections]);
+  }, [circuits, manifolds, manifoldConnections]);
 
   const commitFloorRename = (id: string, name: string) => {
     const trimmed = name.trim();
@@ -258,9 +291,10 @@ export const App: React.FC = () => {
               ...z,
               points: z.points.map((p) => addPoint(p, offset))
             })),
-            manifoldPosition: f.manifoldPosition
-              ? addPoint(f.manifoldPosition, offset)
-              : null,
+            manifolds: (f.manifolds ?? []).map((m) => ({
+              ...m,
+              position: addPoint(m.position, offset)
+            })),
             manifoldConnections: f.manifoldConnections.map((c) => ({
               ...c,
               points: c.points.map((p) => addPoint(p, offset))
@@ -287,8 +321,22 @@ export const App: React.FC = () => {
     if (result) {
       applyOffsetToCurrentFloor(result.offset);
       canvasRef.current?.resetPan();
-      setDraftRoom(null);
-      setDraftZone(null);
+      setDraftRoom((current) => {
+        if (current) {
+          setRooms((prev) =>
+            prev.filter((r) => r.id !== current.id || !isDegenerateRect(r.points))
+          );
+        }
+        return null;
+      });
+      setDraftZone((current) => {
+        if (current) {
+          setZones((prev) =>
+            prev.filter((z) => z.id !== current.id || !isDegenerateRect(z.points))
+          );
+        }
+        return null;
+      });
       setConnectionDrawing(null);
     }
   };
@@ -303,8 +351,25 @@ export const App: React.FC = () => {
       zones: typeof updater === "function" ? updater(zones) : updater
     });
   };
-  const setManifoldPosition = (value: Point | null) => {
-    updateCurrentFloor({ manifoldPosition: value });
+  const setManifolds = (updater: ManifoldItem[] | ((prev: ManifoldItem[]) => ManifoldItem[])) => {
+    updateCurrentFloor({
+      manifolds: typeof updater === "function" ? updater(manifolds) : updater
+    });
+  };
+  const addManifold = (position: Point) => {
+    setManifolds((prev) => [
+      ...prev,
+      { id: `manifold-${Date.now()}`, position, name: "Manifold" }
+    ]);
+  };
+  const updateManifold = (id: string, patch: Partial<ManifoldItem>) => {
+    setManifolds((prev) =>
+      prev.map((m) => (m.id === id ? { ...m, ...patch } : m))
+    );
+  };
+  const removeManifold = (id: string) => {
+    setManifolds((prev) => prev.filter((m) => m.id !== id));
+    setManifoldConnections((prev) => prev.filter((c) => c.manifoldId !== id));
   };
   const setManifoldConnections = (updater: ManifoldConnection[] | ((prev: ManifoldConnection[]) => ManifoldConnection[])) => {
     updateCurrentFloor({
@@ -358,11 +423,20 @@ export const App: React.FC = () => {
               id: f.id ?? `floor-${Date.now()}`,
               name: f.name ?? "Floor",
               rooms: Array.isArray(f.rooms) ? f.rooms : [],
-              zones: Array.isArray(f.zones) ? f.zones : [],
-              manifoldPosition: f.manifoldPosition ?? null,
+              zones: deduplicateZones(Array.isArray(f.zones) ? f.zones : []),
+              manifolds: Array.isArray(f.manifolds)
+                ? f.manifolds.map((m: any) => ({
+                    id: m.id ?? `manifold-${Date.now()}`,
+                    position: m.position ?? { x: 0, y: 0 },
+                    name: m.name
+                  }))
+                : f.manifoldPosition
+                  ? [{ id: "manifold-1", position: f.manifoldPosition, name: "Manifold" }]
+                  : [],
               manifoldConnections: Array.isArray(f.manifoldConnections)
                 ? f.manifoldConnections.map((c: any) => ({
                     circuitId: c.circuitId,
+                    manifoldId: c.manifoldId,
                     points: c.points ?? []
                   }))
                 : [],
@@ -371,7 +445,8 @@ export const App: React.FC = () => {
                   ? f.circuitInletOverrides
                   : {},
               circuits: Array.isArray(f.circuits) ? f.circuits : [],
-              paths: Array.isArray(f.paths) ? f.paths : []
+              paths: Array.isArray(f.paths) ? f.paths : [],
+              maxCircuitLengthM: typeof f.maxCircuitLengthM === "number" ? f.maxCircuitLengthM : 60
             }))
           );
           if (parsed.currentFloorId && parsed.floors.some((f: any) => f.id === parsed.currentFloorId)) {
@@ -384,11 +459,14 @@ export const App: React.FC = () => {
           const currentId = "floor-1";
           const legacyFloorPatch = {
             rooms: parsed.rooms,
-            zones: Array.isArray(parsed.zones) ? parsed.zones : [],
-            manifoldPosition: parsed.manifoldPosition ?? null,
+            zones: deduplicateZones(Array.isArray(parsed.zones) ? parsed.zones : []),
+            manifolds: parsed.manifoldPosition
+              ? [{ id: "manifold-1", position: parsed.manifoldPosition, name: "Manifold" }]
+              : [],
             manifoldConnections: Array.isArray(parsed.manifoldConnections)
               ? parsed.manifoldConnections.map((c: any) => ({
                   circuitId: c.circuitId,
+                  manifoldId: c.manifoldId,
                   points: c.points ?? []
                 }))
               : [],
@@ -397,7 +475,8 @@ export const App: React.FC = () => {
                 ? parsed.circuitInletOverrides
                 : {},
             circuits: [] as CircuitRow[],
-            paths: [] as CircuitPath[]
+            paths: [] as CircuitPath[],
+            maxCircuitLengthM: typeof (parsed as any).maxCircuitLengthM === "number" ? (parsed as any).maxCircuitLengthM : 60
           };
           setFloors((prev) =>
             prev.some((f) => f.id === currentId)
@@ -413,8 +492,22 @@ export const App: React.FC = () => {
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setDraftRoom(null);
-        setDraftZone(null);
+        setDraftRoom((current) => {
+          if (current) {
+            setRooms((prev) =>
+              prev.filter((r) => r.id !== current.id || !isDegenerateRect(r.points))
+            );
+          }
+          return null;
+        });
+        setDraftZone((current) => {
+          if (current) {
+            setZones((prev) =>
+              prev.filter((z) => z.id !== current.id || !isDegenerateRect(z.points))
+            );
+          }
+          return null;
+        });
         setConnectionDrawing(null);
         setDragState(null);
         setCornerDragState(null);
@@ -423,6 +516,7 @@ export const App: React.FC = () => {
     const handleMouseUp = () => {
       setDragState(null);
       setCornerDragState(null);
+      setDraggingManifoldId(null);
     };
     window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("mouseup", handleMouseUp);
@@ -496,26 +590,30 @@ export const App: React.FC = () => {
     ];
   };
 
-  const handleConnectionStartAtManifold = () => {
-    if (!manifoldPosition) return;
-    setConnectionDrawing({ points: [manifoldPosition] });
+  const handleConnectionStartAtManifold = (manifoldId: string, point: Point) => {
+    setConnectionDrawing({ points: [point], startManifoldId: manifoldId });
   };
 
   const handleConnectionStartAtInlet = (circuitId: string, point: Point) => {
     setConnectionDrawing({ points: [point], startCircuitId: circuitId });
   };
 
-  const handleFinishConnectionAtManifold = () => {
-    if (!connectionDrawing || connectionDrawing.points.length < 1 || !connectionDrawing.startCircuitId || !manifoldPosition) return;
+  const handleFinishConnectionAtManifold = (manifoldId: string) => {
+    if (!connectionDrawing || connectionDrawing.points.length < 1) return;
+    const circuitId = connectionDrawing.startCircuitId;
+    if (!circuitId) return;
+    const manifold = manifolds.find((m) => m.id === manifoldId);
+    if (!manifold) return;
     const last = connectionDrawing.points[connectionDrawing.points.length - 1]!;
     const points: Point[] = [...connectionDrawing.points];
-    if (last.x !== manifoldPosition.x || last.y !== manifoldPosition.y) {
-      points.push(snapToOrthogonal(last, manifoldPosition));
+    if (last.x !== manifold.position.x || last.y !== manifold.position.y) {
+      points.push(snapToOrthogonal(last, manifold.position));
     }
-    points.push(manifoldPosition);
+    points.push(manifold.position);
     setManifoldConnections((prev) =>
-      prev.filter((c) => c.circuitId !== connectionDrawing.startCircuitId).concat({
-        circuitId: connectionDrawing.startCircuitId,
+      prev.filter((c) => c.circuitId !== circuitId).concat({
+        circuitId,
+        manifoldId,
         points
       })
     );
@@ -593,24 +691,21 @@ export const App: React.FC = () => {
     if (drawMode === "create-zone") {
       setDraftZone((current) => {
         if (!current) {
-          const nextIndex = zones.length + 1;
-          return {
-            id: `zone-${nextIndex}`,
-            name: `Zone ${nextIndex}`,
-            points: [pointMeters],
-            roomId: findContainingRoomId(pointMeters)
+          const id = `zone-${Date.now()}`;
+          const roomId = findContainingRoomId(pointMeters);
+          const degenerate: Point[] = [pointMeters, pointMeters, pointMeters, pointMeters, pointMeters];
+          const newZone: Zone = {
+            id,
+            name: `Zone ${zones.length + 1}`,
+            points: degenerate,
+            roomId,
+            pipeSpacingM: pipeSpacingM
           };
+          setZones((prev) => [...prev, newZone]);
+          return { id, name: newZone.name, points: [pointMeters], roomId, pipeSpacingM: newZone.pipeSpacingM };
         }
         const first = current.points[0];
-        if (!first) {
-          const nextIndex = zones.length + 1;
-          return {
-            id: `zone-${nextIndex}`,
-            name: `Zone ${nextIndex}`,
-            points: [pointMeters],
-            roomId: findContainingRoomId(pointMeters)
-          };
-        }
+        if (!first) return current;
         const lastCorner = current.points[1] ?? pointMeters;
         const x1 = Math.min(first.x, lastCorner.x);
         const x2 = Math.max(first.x, lastCorner.x);
@@ -623,15 +718,17 @@ export const App: React.FC = () => {
           { x: x1, y: y2 },
           { x: x1, y: y1 }
         ];
-        const completed: Zone = {
-          ...current,
-          points: rectPoints,
-          roomId:
-            current.roomId ??
-            findContainingRoomId({ x: (x1 + x2) / 2, y: (y1 + y2) / 2 }),
-          pipeSpacingM: current.pipeSpacingM ?? pipeSpacingM
-        };
-        setZones((prev) => [...prev, completed]);
+        setZones((prev) =>
+          prev.map((z) =>
+            z.id === current.id
+              ? {
+                  ...z,
+                  points: rectPoints,
+                  roomId: z.roomId ?? findContainingRoomId({ x: (x1 + x2) / 2, y: (y1 + y2) / 2 })
+                }
+              : z
+          )
+        );
         return null;
       });
       return;
@@ -640,20 +737,18 @@ export const App: React.FC = () => {
     if (drawMode === "create-room") {
       setDraftRoom((current) => {
         if (!current) {
-          return {
-            id: `room-${rooms.length + 1}`,
+          const id = `room-${Date.now()}`;
+          const degenerate: Point[] = [pointMeters, pointMeters, pointMeters, pointMeters, pointMeters];
+          const newRoom: Room = {
+            id,
             name: `Room ${rooms.length + 1}`,
-            points: [pointMeters]
+            points: degenerate
           };
+          setRooms((prev) => [...prev, newRoom]);
+          return { id, name: newRoom.name, points: [pointMeters] };
         }
         const first = current.points[0];
-        if (!first) {
-          return {
-            id: `room-${rooms.length + 1}`,
-            name: `Room ${rooms.length + 1}`,
-            points: [pointMeters]
-          };
-        }
+        if (!first) return current;
         const lastCorner = current.points[1] ?? pointMeters;
         const x1 = Math.min(first.x, lastCorner.x);
         const x2 = Math.max(first.x, lastCorner.x);
@@ -666,11 +761,9 @@ export const App: React.FC = () => {
           { x: x1, y: y2 },
           { x: x1, y: y1 }
         ];
-        const completed: Room = {
-          ...current,
-          points: rectPoints
-        };
-        setRooms((prev) => [...prev, completed]);
+        setRooms((prev) =>
+          prev.map((r) => (r.id === current.id ? { ...r, points: rectPoints } : r))
+        );
         return null;
       });
     }
@@ -699,7 +792,10 @@ export const App: React.FC = () => {
       return;
     }
     if (drawMode === "manifold") {
-      setManifoldPosition(pointMeters);
+      addManifold(pointMeters);
+      return;
+    }
+    if (drawMode === "move-manifold") {
       return;
     }
   };
@@ -755,6 +851,11 @@ export const App: React.FC = () => {
       }
       return;
     }
+    if (draggingManifoldId) {
+      const m = manifolds.find((x) => x.id === draggingManifoldId);
+      if (m) updateManifold(draggingManifoldId, { position: pointMeters });
+      return;
+    }
     setDraftRoom((current) => {
       if (!current || current.points.length === 0) return current;
       if (drawMode !== "create-room") return current;
@@ -776,9 +877,22 @@ export const App: React.FC = () => {
   };
 
   const handleFinishRoom = () => {
-    // Explicit finish now acts as cancel for the current draft.
-    setDraftRoom(null);
-    setDraftZone(null);
+    setDraftRoom((current) => {
+      if (current) {
+        setRooms((prev) =>
+          prev.filter((r) => r.id !== current.id || !isDegenerateRect(r.points))
+        );
+      }
+      return null;
+    });
+    setDraftZone((current) => {
+      if (current) {
+        setZones((prev) =>
+          prev.filter((z) => z.id !== current.id || !isDegenerateRect(z.points))
+        );
+      }
+      return null;
+    });
   };
 
   const handleClearRooms = () => {
@@ -816,7 +930,7 @@ export const App: React.FC = () => {
   const handleMaxCircuitLengthChange = (e: ChangeEvent<HTMLInputElement>) => {
     const value = Number(e.target.value);
     if (!Number.isFinite(value) || value <= 0) return;
-    setMaxCircuitLengthM(value);
+    updateCurrentFloor({ maxCircuitLengthM: value });
   };
 
   const handleSaveLayout = () => {
@@ -837,8 +951,7 @@ export const App: React.FC = () => {
   };
 
   const handleCalculateCircuits = async () => {
-    if (!manifoldPosition) {
-      // Manifold is required as reference.
+    if (manifolds.length === 0) {
       return;
     }
     if (rooms.length === 0) {
@@ -846,7 +959,6 @@ export const App: React.FC = () => {
     }
 
     const storeyId = "storey-1";
-    const manifoldId = "manifold-1";
 
     const toPolygon = (points: Point[]) => {
       const closed =
@@ -878,14 +990,12 @@ export const App: React.FC = () => {
             outline: toPolygon(room.points),
             obstacles: []
           })),
-          manifolds: [
-            {
-              id: manifoldId,
-              storey_id: storeyId,
-              position: manifoldPosition,
-              name: "Manifold"
-            }
-          ]
+          manifolds: manifolds.map((m) => ({
+            id: m.id,
+            storey_id: storeyId,
+            position: m.position,
+            name: m.name ?? "Manifold"
+          }))
         }
       ]
     };
@@ -910,14 +1020,12 @@ export const App: React.FC = () => {
     const project = {
       floorplan,
       zones: zonesForBackend,
-      manifolds: [
-        {
-          id: manifoldId,
-          storey_id: storeyId,
-          position: manifoldPosition,
-          name: "Manifold"
-        }
-      ]
+      manifolds: manifolds.map((m) => ({
+        id: m.id,
+        storey_id: storeyId,
+        position: m.position,
+        name: m.name ?? "Manifold"
+      }))
     };
 
     const pipe_spacing_by_zone_id: Record<string, number> | undefined =
@@ -930,7 +1038,7 @@ export const App: React.FC = () => {
     const params = {
       pipe_spacing_m: pipeSpacingM,
       pipe_spacing_by_zone_id,
-      max_circuit_length_m: maxCircuitLengthM
+      max_circuit_length_m: currentFloor.maxCircuitLengthM ?? 60
     };
 
     try {
@@ -1002,17 +1110,20 @@ export const App: React.FC = () => {
               id: f.id ?? `floor-${Date.now()}`,
               name: f.name ?? "Floor",
               rooms: Array.isArray(f.rooms) ? f.rooms : [],
-              zones: Array.isArray(f.zones) ? f.zones : [],
-              manifoldPosition: f.manifoldPosition ?? null,
+              zones: deduplicateZones(Array.isArray(f.zones) ? f.zones : []),
+              manifolds: Array.isArray(f.manifolds)
+                ? f.manifolds.map((m: any) => ({ id: m.id ?? `manifold-${Date.now()}`, position: m.position ?? { x: 0, y: 0 }, name: m.name }))
+                : f.manifoldPosition ? [{ id: "manifold-1", position: f.manifoldPosition, name: "Manifold" }] : [],
               manifoldConnections: Array.isArray(f.manifoldConnections)
-                ? f.manifoldConnections.map((c: any) => ({ circuitId: c.circuitId, points: c.points ?? [] }))
+                ? f.manifoldConnections.map((c: any) => ({ circuitId: c.circuitId, manifoldId: c.manifoldId, points: c.points ?? [] }))
                 : [],
               circuitInletOverrides:
                 f.circuitInletOverrides && typeof f.circuitInletOverrides === "object"
                   ? f.circuitInletOverrides
                   : {},
               circuits: Array.isArray(f.circuits) ? f.circuits : [],
-              paths: Array.isArray(f.paths) ? f.paths : []
+              paths: Array.isArray(f.paths) ? f.paths : [],
+              maxCircuitLengthM: typeof f.maxCircuitLengthM === "number" ? f.maxCircuitLengthM : 60
             }))
           );
           setCurrentFloorId(
@@ -1021,20 +1132,20 @@ export const App: React.FC = () => {
               : parsed.floors[0].id
           );
         } else if (Array.isArray(parsed.rooms)) {
-          // Legacy layout (no floors): assign to current floor
           const legacyFloorPatch = {
             rooms: parsed.rooms,
-            zones: Array.isArray(parsed.zones) ? parsed.zones : [],
-            manifoldPosition: parsed.manifoldPosition ?? null,
+            zones: deduplicateZones(Array.isArray(parsed.zones) ? parsed.zones : []),
+            manifolds: parsed.manifoldPosition ? [{ id: "manifold-1", position: parsed.manifoldPosition, name: "Manifold" }] : [],
             manifoldConnections: Array.isArray(parsed.manifoldConnections)
-              ? parsed.manifoldConnections.map((c: any) => ({ circuitId: c.circuitId, points: c.points ?? [] }))
+              ? parsed.manifoldConnections.map((c: any) => ({ circuitId: c.circuitId, manifoldId: c.manifoldId, points: c.points ?? [] }))
               : [],
             circuitInletOverrides:
               parsed.circuitInletOverrides && typeof parsed.circuitInletOverrides === "object"
                 ? parsed.circuitInletOverrides
                 : {},
             circuits: [] as CircuitRow[],
-            paths: [] as CircuitPath[]
+            paths: [] as CircuitPath[],
+            maxCircuitLengthM: 60
           };
           setFloors((prev) => {
             const hasCurrent = prev.some((f) => f.id === currentId);
@@ -1081,17 +1192,20 @@ export const App: React.FC = () => {
               id: `${baseId}-${i}`,
               name: f.name ?? `Floor ${prev.length + i + 1}`,
               rooms: Array.isArray(f.rooms) ? f.rooms : [],
-              zones: Array.isArray(f.zones) ? f.zones : [],
-              manifoldPosition: f.manifoldPosition ?? null,
+              zones: deduplicateZones(Array.isArray(f.zones) ? f.zones : []),
+              manifolds: Array.isArray(f.manifolds)
+                ? f.manifolds.map((m: any) => ({ id: m.id ?? `manifold-${Date.now()}-${i}`, position: m.position ?? { x: 0, y: 0 }, name: m.name }))
+                : f.manifoldPosition ? [{ id: "manifold-1", position: f.manifoldPosition, name: "Manifold" }] : [],
               manifoldConnections: Array.isArray(f.manifoldConnections)
-                ? f.manifoldConnections.map((c: any) => ({ circuitId: c.circuitId, points: c.points ?? [] }))
+                ? f.manifoldConnections.map((c: any) => ({ circuitId: c.circuitId, manifoldId: c.manifoldId, points: c.points ?? [] }))
                 : [],
               circuitInletOverrides:
                 f.circuitInletOverrides && typeof f.circuitInletOverrides === "object"
                   ? f.circuitInletOverrides
                   : {},
               circuits: Array.isArray(f.circuits) ? f.circuits : [],
-              paths: Array.isArray(f.paths) ? f.paths : []
+              paths: Array.isArray(f.paths) ? f.paths : [],
+              maxCircuitLengthM: typeof f.maxCircuitLengthM === "number" ? f.maxCircuitLengthM : 60
             }));
             firstNewId = newFloors[0]!.id;
             return [...prev, ...newFloors];
@@ -1104,18 +1218,19 @@ export const App: React.FC = () => {
             {
               id,
               name: `Floor ${prev.length + 1}`,
-              rooms: parsed.rooms,
-              zones: Array.isArray(parsed.zones) ? parsed.zones : [],
-              manifoldPosition: parsed.manifoldPosition ?? null,
+              rooms: parsed.rooms ?? [],
+              zones: deduplicateZones(Array.isArray(parsed.zones) ? parsed.zones : []),
+              manifolds: parsed.manifoldPosition ? [{ id: "manifold-1", position: parsed.manifoldPosition, name: "Manifold" }] : [],
               manifoldConnections: Array.isArray(parsed.manifoldConnections)
-                ? parsed.manifoldConnections.map((c: any) => ({ circuitId: c.circuitId, points: c.points ?? [] }))
+                ? parsed.manifoldConnections.map((c: any) => ({ circuitId: c.circuitId, manifoldId: c.manifoldId, points: c.points ?? [] }))
                 : [],
               circuitInletOverrides:
                 parsed.circuitInletOverrides && typeof parsed.circuitInletOverrides === "object"
                   ? parsed.circuitInletOverrides
                   : {},
               circuits: [],
-              paths: []
+              paths: [],
+              maxCircuitLengthM: 60
             }
           ]);
           setCurrentFloorId(id);
@@ -1281,6 +1396,22 @@ export const App: React.FC = () => {
 
   const handleDeleteZone = (zoneId: string) => {
     setZones((prev) => prev.filter((zone) => zone.id !== zoneId));
+  };
+
+  const handleRoomRename = (roomId: string, name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setRooms((prev) =>
+      prev.map((room) => (room.id === roomId ? { ...room, name: trimmed } : room))
+    );
+  };
+
+  const handleZoneRename = (zoneId: string, name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setZones((prev) =>
+      prev.map((zone) => (zone.id === zoneId ? { ...zone, name: trimmed } : zone))
+    );
   };
 
   const handleCloneZone = (zoneId: string) => {
@@ -1536,7 +1667,7 @@ export const App: React.FC = () => {
                 type="number"
                 min={1}
                 step={1}
-                value={maxCircuitLengthM}
+                value={currentFloor.maxCircuitLengthM ?? 60}
                 onChange={handleMaxCircuitLengthChange}
               />
             </label>
@@ -1602,7 +1733,10 @@ export const App: React.FC = () => {
           onCanvasClick={handleCanvasClick}
           onCanvasMouseDown={handleCanvasMouseDown}
           onCanvasMove={handleCanvasMove}
-          manifoldPosition={manifoldPosition}
+          manifolds={manifolds}
+          onManifoldMouseDown={
+            drawMode === "move-manifold" ? (id) => setDraggingManifoldId(id) : undefined
+          }
           onRoomMouseDown={(roomId, point) => {
             if (drawMode !== "edit-rooms") return;
             const room = rooms.find((r) => r.id === roomId);
@@ -1651,13 +1785,13 @@ export const App: React.FC = () => {
           connectionDrawing={connectionDrawing?.points ?? null}
           connectionStartCircuitId={connectionDrawing?.startCircuitId}
           onConnectionStartAtManifold={
-            drawMode === "add-connection" ? handleConnectionStartAtManifold : undefined
+            drawMode === "add-connection" ? (manifoldId: string, point: Point) => handleConnectionStartAtManifold(manifoldId, point) : undefined
           }
           onConnectionStartAtInlet={
             drawMode === "add-connection" ? handleConnectionStartAtInlet : undefined
           }
           onFinishConnectionAtManifold={
-            drawMode === "add-connection" ? handleFinishConnectionAtManifold : undefined
+            drawMode === "add-connection" ? (manifoldId: string) => handleFinishConnectionAtManifold(manifoldId) : undefined
           }
           onConnectionFinishAtInlet={
             drawMode === "add-connection" ? handleConnectionFinishAtInlet : undefined
@@ -1684,13 +1818,14 @@ export const App: React.FC = () => {
           >
             Calculate circuits
           </button>
-          <CircuitsTotalsCard circuits={circuits} manifoldConnections={manifoldConnections} />
+          <CircuitsTotalsCard circuits={circuits} manifoldConnections={manifoldConnections} manifolds={manifolds} />
           <div className="panel">
             <ShapeListPanel
             title="Rooms (dimensions in meters)"
             items={roomSummaries}
             emptyMessage="Click two opposite corners on the canvas to draw a rectangular room."
             onDimensionChange={handleRoomDimensionChange}
+            onRename={handleRoomRename}
             onDelete={handleDeleteRoom}
             draft={draftRoomSummary}
             onDraftDimensionChange={handleDraftDimensionChange}
@@ -1706,6 +1841,7 @@ export const App: React.FC = () => {
             defaultPipeSpacingM={pipeSpacingM}
             onDimensionChange={handleZoneDimensionChange}
             onPipeSpacingChange={handleZonePipeSpacingChange}
+            onRename={handleZoneRename}
             onClone={handleCloneZone}
             onDelete={handleDeleteZone}
             onExpand={handleExpandZone}
@@ -1778,79 +1914,64 @@ export const App: React.FC = () => {
 
           <div className="panel manifold-card">
             <div className="panel-title">
-              <span>Manifold position (m)</span>
+              <span>Manifolds</span>
+              <span className="panel-subtitle">Position (m). Place manifold mode: click canvas to add.</span>
             </div>
-            {manifoldPosition ? (
-              <div style={{ marginTop: 8, display: "flex", gap: "0.5rem" }}>
-                <label>
-                  <span style={{ marginRight: 4 }}>X</span>
-                  <input
-                    type="number"
-                    value={
-                      manifoldEditingKey === "x"
-                        ? manifoldEditingValue
-                        : manifoldPosition.x
-                    }
-                    onFocus={() => {
-                      setManifoldEditingKey("x");
-                      setManifoldEditingValue(String(manifoldPosition.x));
-                    }}
-                    onChange={(e) => {
-                      if (manifoldEditingKey === "x") {
-                        setManifoldEditingValue(e.target.value);
-                      }
-                    }}
-                    onBlur={() => {
-                      if (manifoldEditingKey === "x") {
-                        const n = Number(manifoldEditingValue);
-                        if (Number.isFinite(n)) {
-                          setManifoldPosition({
-                            x: n,
-                            y: manifoldPosition.y
-                          });
-                        }
-                        setManifoldEditingKey(null);
-                      }
-                    }}
-                  />
-                </label>
-                <label>
-                  <span style={{ marginRight: 4 }}>Y</span>
-                  <input
-                    type="number"
-                    value={
-                      manifoldEditingKey === "y"
-                        ? manifoldEditingValue
-                        : manifoldPosition.y
-                    }
-                    onFocus={() => {
-                      setManifoldEditingKey("y");
-                      setManifoldEditingValue(String(manifoldPosition.y));
-                    }}
-                    onChange={(e) => {
-                      if (manifoldEditingKey === "y") {
-                        setManifoldEditingValue(e.target.value);
-                      }
-                    }}
-                    onBlur={() => {
-                      if (manifoldEditingKey === "y") {
-                        const n = Number(manifoldEditingValue);
-                        if (Number.isFinite(n)) {
-                          setManifoldPosition({
-                            x: manifoldPosition.x,
-                            y: n
-                          });
-                        }
-                        setManifoldEditingKey(null);
-                      }
-                    }}
-                  />
-                </label>
+            {manifolds.length === 0 ? (
+              <div className="panel-empty">
+                Switch to “Place manifold” and click on the canvas to add one.
               </div>
             ) : (
-              <div className="panel-empty">
-                Switch to “Manifold” mode and click on the canvas to place it.
-              </div>
+              <ul style={{ listStyle: "none", padding: 0, marginTop: 8 }}>
+                {manifolds.map((m) => (
+                  <li
+                    key={m.id}
+                    style={{
+                      display: "flex",
+                      flexWrap: "wrap",
+                      alignItems: "center",
+                      gap: "0.5rem",
+                      marginBottom: 8,
+                      paddingBottom: 8,
+                      borderBottom: "1px solid #eee"
+                    }}
+                  >
+                    <span style={{ minWidth: 80 }}>{m.name ?? "Manifold"}</span>
+                    <label>
+                      <span style={{ marginRight: 4 }}>X</span>
+                      <input
+                        type="number"
+                        style={{ width: 64 }}
+                        value={m.position.x}
+                        onChange={(e) => {
+                          const n = Number(e.target.value);
+                          if (Number.isFinite(n)) updateManifold(m.id, { position: { ...m.position, x: n } });
+                        }}
+                      />
+                    </label>
+                    <label>
+                      <span style={{ marginRight: 4 }}>Y</span>
+                      <input
+                        type="number"
+                        style={{ width: 64 }}
+                        value={m.position.y}
+                        onChange={(e) => {
+                          const n = Number(e.target.value);
+                          if (Number.isFinite(n)) updateManifold(m.id, { position: { ...m.position, y: n } });
+                        }}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => removeManifold(m.id)}
+                      style={{ padding: "2px 6px", marginLeft: "auto" }}
+                      title="Remove manifold"
+                    >
+                      Delete
+                    </button>
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
         </aside>

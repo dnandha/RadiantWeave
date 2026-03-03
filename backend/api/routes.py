@@ -113,26 +113,35 @@ def calculate_layout(
     for m in project.manifolds:
         manifolds_by_storey.setdefault(m.storey_id, []).append(m)
 
-    # Pre-compute Manhattan distance from each zone to its nearest manifold
-    # on the same storey.
-    manhattan_by_zone: dict[str, float] = {}
-    for zone in project.zones:
+    def _nearest_manifold(zone: HeatingZone) -> Manifold | None:
         m_list = manifolds_by_storey.get(zone.storey_id) or []
         if not m_list:
-            continue
-        manifold = m_list[0]
+            return None
         cx, cy = _polygon_bounds_center(zone.geometry)
-        mx, my = manifold.position.x, manifold.position.y
-        manhattan = abs(cx - mx) + abs(cy - my)
+        best: Manifold | None = None
+        best_dist: float = float("inf")
+        for m in m_list:
+            d = abs(cx - m.position.x) + abs(cy - m.position.y)
+            if d < best_dist:
+                best_dist = d
+                best = m
+        return best
+
+    # Pre-compute Manhattan distance from each zone to its nearest manifold (for sizing display).
+    manhattan_by_zone: dict[str, float] = {}
+    for zone in project.zones:
+        manifold = _nearest_manifold(zone)
+        if manifold is None:
+            continue
+        cx, cy = _polygon_bounds_center(zone.geometry)
+        manhattan = abs(cx - manifold.position.x) + abs(cy - manifold.position.y)
         manhattan_by_zone[zone.id] = manhattan
 
     circuits: List[Circuit] = []
     for zone, sizing in zip(project.zones, sizing_results):
-        m_list = manifolds_by_storey.get(zone.storey_id) or []
-        if not m_list or sizing.circuit_count <= 0:
+        manifold = _nearest_manifold(zone)
+        if manifold is None or sizing.circuit_count <= 0:
             continue
-
-        manifold = m_list[0]
 
         # Collect obstacles from rooms on same storey whose outlines intersect zone.
         obstacles: List[Polygon] = []

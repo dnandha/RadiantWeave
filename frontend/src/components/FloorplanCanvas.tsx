@@ -36,7 +36,10 @@ type Props = {
   onCanvasClick?: (pointMeters: Point) => void;
   onCanvasMouseDown?: (pointMeters: Point) => void;
   onCanvasMove?: (pointMeters: Point) => void;
-  manifoldPosition?: Point | null;
+  /** Multiple manifolds per floor. */
+  manifolds?: { id: string; position: Point; name?: string }[];
+  /** When in move-manifold mode, called when user starts dragging a manifold. */
+  onManifoldMouseDown?: (manifoldId: string) => void;
   onRoomMouseDown?: (roomId: string, pointMeters: Point) => void;
   onZoneMouseDown?: (zoneId: string, pointMeters: Point) => void;
   onRoomCornerMouseDown?: (roomId: string, cornerIndex: number, pointMeters: Point) => void;
@@ -44,9 +47,9 @@ type Props = {
   manifoldConnections?: ManifoldConnection[];
   connectionDrawing?: Point[] | null;
   connectionStartCircuitId?: string | null;
-  onConnectionStartAtManifold?: () => void;
+  onConnectionStartAtManifold?: (manifoldId: string, point: Point) => void;
   onConnectionStartAtInlet?: (circuitId: string, point: Point) => void;
-  onFinishConnectionAtManifold?: () => void;
+  onFinishConnectionAtManifold?: (manifoldId: string) => void;
   onConnectionFinishAtInlet?: (circuitId: string, point: Point) => void;
   onConnectionAddPoint?: (point: Point) => void;
   circuitInletOverrides?: Record<string, Point>;
@@ -114,7 +117,8 @@ export const FloorplanCanvas = forwardRef<FloorplanCanvasHandle, Props>(function
   onCanvasClick,
   onCanvasMouseDown,
   onCanvasMove,
-  manifoldPosition,
+  manifolds = [],
+  onManifoldMouseDown,
   onRoomMouseDown,
   onZoneMouseDown,
   onRoomCornerMouseDown,
@@ -169,7 +173,7 @@ export const FloorplanCanvas = forwardRef<FloorplanCanvasHandle, Props>(function
     for (const r of rooms) allPoints.push(...r.points);
     for (const z of zones) allPoints.push(...z.points);
     for (const c of circuits) allPoints.push(...c.points);
-    if (manifoldPosition) allPoints.push(manifoldPosition);
+    for (const m of manifolds) allPoints.push(m.position);
     if (tempRoom) allPoints.push(...tempRoom.points);
     if (tempZone) allPoints.push(...tempZone.points);
     if (connectionDrawing) allPoints.push(...connectionDrawing);
@@ -214,7 +218,7 @@ export const FloorplanCanvas = forwardRef<FloorplanCanvasHandle, Props>(function
     const bounds = getContentBoundsMeters();
     if (!bounds) return null;
     return (bounds.maxY - bounds.minY) * pixelsPerMeter;
-  }, [rooms, zones, circuits, manifoldPosition, tempRoom, tempZone, connectionDrawing, manifoldConnections, pixelsPerMeter]);
+  }, [rooms, zones, circuits, manifolds, tempRoom, tempZone, connectionDrawing, manifoldConnections, pixelsPerMeter]);
 
   const canvasMinHeight = 600;
   const canvasHeight =
@@ -227,14 +231,14 @@ export const FloorplanCanvas = forwardRef<FloorplanCanvasHandle, Props>(function
     if (!p) return;
     if (isAddConnection) {
       const hasPoints = connectionDrawing && connectionDrawing.length >= 1;
-      if (manifoldPosition) {
-        const distManifold = Math.hypot(p.x - manifoldPosition.x, p.y - manifoldPosition.y);
+      for (const m of manifolds) {
+        const distManifold = Math.hypot(p.x - m.position.x, p.y - m.position.y);
         if (distManifold <= CONNECTION_HIT_M) {
           e.stopPropagation();
           if (!hasPoints) {
-            onConnectionStartAtManifold?.();
+            onConnectionStartAtManifold?.(m.id, m.position);
           } else if (connectionStartCircuitId) {
-            onFinishConnectionAtManifold?.();
+            onFinishConnectionAtManifold?.(m.id);
           }
           return;
         }
@@ -337,16 +341,33 @@ export const FloorplanCanvas = forwardRef<FloorplanCanvasHandle, Props>(function
         }}
       >
         <g transform={`translate(${pan.x}, ${pan.y})`}>
-        {manifoldPosition && (
-          <circle
-            cx={manifoldPosition.x * pixelsPerMeter}
-            cy={manifoldPosition.y * pixelsPerMeter}
-            r={6}
-            fill="#e76f51"
-            stroke="#000"
-            strokeWidth={1}
-          />
-        )}
+        {manifolds.map((m) => {
+          const isMoveManifold = drawMode === "move-manifold";
+          return (
+            <circle
+              key={m.id}
+              cx={m.position.x * pixelsPerMeter}
+              cy={m.position.y * pixelsPerMeter}
+              r={6}
+              fill="#e76f51"
+              stroke="#000"
+              strokeWidth={1}
+              style={{
+                cursor: isMoveManifold ? "grab" : "default",
+                pointerEvents: isMoveManifold ? "auto" : "none"
+              }}
+              onMouseDown={
+                isMoveManifold && onManifoldMouseDown
+                  ? (e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      onManifoldMouseDown(m.id);
+                    }
+                  : undefined
+              }
+            />
+          );
+        })}
         {rooms.map((room) => {
           const pathD = toSvgPath(room.points);
           const xs = room.points.map((p) => p.x * pixelsPerMeter);

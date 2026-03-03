@@ -7,6 +7,7 @@ export type DrawMode =
   | "edit-rooms"
   | "edit-zones"
   | "manifold"
+  | "move-manifold"
   | "add-connection"
   | "move-inlet";
 
@@ -17,6 +18,7 @@ const MODES: { value: DrawMode; label: string }[] = [
   { value: "edit-rooms", label: "Edit rooms" },
   { value: "edit-zones", label: "Edit zones" },
   { value: "manifold", label: "Place manifold" },
+  { value: "move-manifold", label: "Move manifold" },
   { value: "add-connection", label: "Add connection" },
   { value: "move-inlet", label: "Move inlet" }
 ];

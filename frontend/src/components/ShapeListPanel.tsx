@@ -1,4 +1,4 @@
-import React, { ChangeEvent, useState } from "react";
+import React, { ChangeEvent, useEffect, useRef, useState } from "react";
 import { ActionsMenu } from "./ActionsMenu";
 
 export type ShapeSummary = {
@@ -13,6 +13,7 @@ type Props = {
   items: ShapeSummary[];
   emptyMessage: string;
   onDimensionChange: (id: string, field: "width" | "height", value: number) => void;
+  onRename?: (id: string, name: string) => void;
   onDelete?: (id: string) => void;
   draft?: { width: number; height: number } | null;
   onDraftDimensionChange?: (field: "width" | "height", value: number) => void;
@@ -25,6 +26,7 @@ export const ShapeListPanel: React.FC<Props> = ({
   items,
   emptyMessage,
   onDimensionChange,
+  onRename,
   onDelete,
   draft,
   onDraftDimensionChange,
@@ -33,6 +35,12 @@ export const ShapeListPanel: React.FC<Props> = ({
 }) => {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState("");
+  const [editingNameId, setEditingNameId] = useState<string | null>(null);
+  const [editingNameValue, setEditingNameValue] = useState("");
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (editingNameId) nameInputRef.current?.focus();
+  }, [editingNameId]);
 
   return (
     <>
@@ -55,7 +63,49 @@ export const ShapeListPanel: React.FC<Props> = ({
             <tbody>
               {items.map((r) => (
                 <tr key={r.id}>
-                  <td className="panel-name-cell">{r.name}</td>
+                  <td className="panel-name-cell">
+                    {editingNameId === r.id ? (
+                      <input
+                        ref={nameInputRef}
+                        type="text"
+                        value={editingNameValue}
+                        onChange={(e) => setEditingNameValue(e.target.value)}
+                        onBlur={() => {
+                          if (onRename && editingNameId === r.id) {
+                            const trimmed = editingNameValue.trim();
+                            if (trimmed) onRename(r.id, trimmed);
+                          }
+                          setEditingNameId(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            if (onRename && editingNameId === r.id) {
+                              const trimmed = editingNameValue.trim();
+                              if (trimmed) onRename(r.id, trimmed);
+                            }
+                            setEditingNameId(null);
+                          } else if (e.key === "Escape") {
+                            setEditingNameId(null);
+                          }
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        style={{ width: "100%", minWidth: 60 }}
+                      />
+                    ) : (
+                      <span
+                        onDoubleClick={() => {
+                          if (onRename) {
+                            setEditingNameId(r.id);
+                            setEditingNameValue(r.name);
+                          }
+                        }}
+                        title={onRename ? "Double-click to rename" : undefined}
+                        style={{ cursor: onRename ? "text" : "default" }}
+                      >
+                        {r.name}
+                      </span>
+                    )}
+                  </td>
                   <td align="right">
                     <input
                       type="number"
