@@ -351,10 +351,11 @@ export const FloorplanCanvas = forwardRef<FloorplanCanvasHandle, Props>(function
           const pathD = toSvgPath(room.points);
           const xs = room.points.map((p) => p.x * pixelsPerMeter);
           const ys = room.points.map((p) => p.y * pixelsPerMeter);
-          const minY = ys.length ? Math.min(...ys) : 0;
+          const minX = xs.length ? Math.min(...xs) : 0;
           const maxX = xs.length ? Math.max(...xs) : 0;
-          const labelX = maxX - 4;
-          const labelY = minY + 14;
+          const minY = ys.length ? Math.min(...ys) : 0;
+          const labelX = (minX + maxX) / 2;
+          const labelY = minY - 14;
           const handleRoomDown = (e: React.MouseEvent<SVGGElement>) => {
             if (!isEditRooms || !onRoomMouseDown) return;
             e.stopPropagation();
@@ -377,7 +378,8 @@ export const FloorplanCanvas = forwardRef<FloorplanCanvasHandle, Props>(function
                 <text
                   x={labelX}
                   y={labelY}
-                  textAnchor="end"
+                  textAnchor="middle"
+                  dominantBaseline="hanging"
                   fontSize={14}
                   fill="#264653"
                 >
@@ -418,9 +420,10 @@ export const FloorplanCanvas = forwardRef<FloorplanCanvasHandle, Props>(function
           const xs = zone.points.map((p) => p.x * pixelsPerMeter);
           const ys = zone.points.map((p) => p.y * pixelsPerMeter);
           const maxX = xs.length ? Math.max(...xs) : 0;
+          const minY = ys.length ? Math.min(...ys) : 0;
           const maxY = ys.length ? Math.max(...ys) : 0;
-          const labelX = maxX - 4;
-          const labelY = maxY - 4;
+          const labelX = maxX + 8;
+          const labelY = (minY + maxY) / 2;
           const handleZoneDown = (e: React.MouseEvent<SVGGElement>) => {
             if (!isEditZones || !onZoneMouseDown) return;
             e.stopPropagation();
@@ -443,9 +446,10 @@ export const FloorplanCanvas = forwardRef<FloorplanCanvasHandle, Props>(function
                 <text
                   x={labelX}
                   y={labelY}
-                  textAnchor="end"
+                  textAnchor="start"
+                  dominantBaseline="middle"
                   fontSize={14}
-                  fill="#2a9d8f"
+                  fill="#000"
                 >
                   {zone.name}
                 </text>

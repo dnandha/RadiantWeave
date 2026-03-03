@@ -208,6 +208,31 @@ export const App: React.FC = () => {
     if (editingFloor) editingFloorInputRef.current?.focus();
   }, [editingFloor]);
 
+  // Remove connections that don't have a valid inlet (circuit exists) or don't reach the manifold.
+  React.useEffect(() => {
+    const circuitIds = new Set(circuits.map((c) => c.id));
+    const MANIFOLD_HIT_M = 0.15;
+    const hasManifold = manifoldPosition != null;
+    const filtered = manifoldConnections.filter((conn) => {
+      if (!circuitIds.has(conn.circuitId)) return false;
+      if (!conn.points?.length || conn.points.length < 2) return false;
+      if (hasManifold) {
+        const first = conn.points[0]!;
+        const last = conn.points[conn.points.length - 1]!;
+        const nearManifold = (p: Point) =>
+          Math.hypot(p.x - manifoldPosition!.x, p.y - manifoldPosition!.y) <= MANIFOLD_HIT_M;
+        if (!nearManifold(first) && !nearManifold(last)) return false;
+      }
+      return true;
+    });
+    const unchanged =
+      manifoldConnections.length === filtered.length &&
+      filtered.every((c, i) => manifoldConnections[i]?.circuitId === c.circuitId);
+    if (!unchanged) {
+      setManifoldConnections(filtered);
+    }
+  }, [circuits, manifoldPosition, manifoldConnections]);
+
   const commitFloorRename = (id: string, name: string) => {
     const trimmed = name.trim();
     if (trimmed) {
@@ -928,6 +953,7 @@ export const App: React.FC = () => {
             zone?.roomId != null
               ? rooms.find((r) => r.id === zone.roomId)
               : rooms.find((r) => r.id === c.zone_id);
+          const algorithm = typeof c.id === "string" && c.id.includes("_spiral_") ? "spiral" : "meander";
           return {
             id: c.id,
             name: c.name,
@@ -936,7 +962,8 @@ export const App: React.FC = () => {
             roomName: room?.name ?? zone?.name ?? c.zone_id,
             zoneId: c.zone_id,
             zoneName: zone?.name ?? c.zone_id,
-            subzoneIndex: c.subzone_index ?? null
+            subzoneIndex: c.subzone_index ?? null,
+            algorithm
           };
         })
       );

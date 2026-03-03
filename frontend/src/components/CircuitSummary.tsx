@@ -11,6 +11,8 @@ type CircuitRow = {
   zoneId?: string;
   zoneName?: string;
   subzoneIndex?: number | null;
+  /** Layout algorithm used: spiral or meander */
+  algorithm?: "spiral" | "meander";
 };
 
 type ManifoldConnection = {
@@ -98,7 +100,7 @@ export const CircuitSummary: React.FC<Props> = ({
     <div>
       <div className="panel-title">
         <span>Circuits</span>
-        <span className="panel-subtitle">Lengths per circuit and per room</span>
+        <span className="panel-subtitle">Total length: in-zone (supply + return, pipe spacing × 2) + 2× stub</span>
       </div>
       {circuits.length === 0 ? (
         <div className="panel-empty">No circuits calculated yet.</div>
@@ -108,8 +110,9 @@ export const CircuitSummary: React.FC<Props> = ({
             <thead>
               <tr>
                 <th align="left">Circuit</th>
-                <th align="left">Room</th>
+                <th align="left" className="panel-name-cell">Room</th>
                 <th align="left">Subzone</th>
+                <th align="left">Layout</th>
                 <th align="right">Length (m)</th>
               </tr>
             </thead>
@@ -121,6 +124,7 @@ export const CircuitSummary: React.FC<Props> = ({
                   <td>
                     {c.subzoneIndex != null ? String(c.subzoneIndex + 1) : "—"}
                   </td>
+                  <td>{c.algorithm === "spiral" ? "Spiral" : c.algorithm === "meander" ? "Meander" : "—"}</td>
                   <td align="right">{totalLengthM(c).toFixed(1)}</td>
                 </tr>
               ))}
@@ -133,7 +137,7 @@ export const CircuitSummary: React.FC<Props> = ({
             <table>
               <thead>
                 <tr>
-                  <th align="left">Room</th>
+                  <th align="left" className="panel-name-cell">Room</th>
                   <th align="right"># Circuits</th>
                   <th align="right">Total length (m)</th>
                 </tr>

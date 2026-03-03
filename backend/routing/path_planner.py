@@ -17,6 +17,139 @@ from ..models.floorplan import Manifold, Point, Polyline, Polygon
 from ..models.heating_zone import HeatingZone
 
 
+def _build_spiral_full_path(
+    zone: HeatingZone,
+    manifold: Manifold,
+    spacing_m: float,
+    max_circuit_length_m: float,
+    params: RoutingParams,
+) -> Tuple[LineString, LineString, float, float, int] | None:
+    """
+    Build the full spiral path (inward + outward) for a rectangular zone.
+    Returns (full_path, inward, total_path_len, max_stub_one_way, required_circuits)
+    or None if the zone is not valid for spiral.
+    """
+    pts = zone.geometry.boundary.points
+    if len(pts) < 4:
+        return None
+
+    xs = [p.x for p in pts]
+    ys = [p.y for p in pts]
+    left, right = min(xs), max(xs)
+    top, bottom = min(ys), max(ys)
+
+    left += params.wall_clearance_m
+    right -= params.wall_clearance_m
+    top += params.wall_clearance_m
+    bottom -= params.wall_clearance_m
+
+    if right <= left or bottom <= top:
+        return None
+
+    spiral_points: List[Tuple[float, float]] = []
+    cur_left, cur_right = left, right
+    cur_top, cur_bottom = top, bottom
+
+    spiral_points.append((cur_right, cur_bottom))
+
+    while True:
+        spiral_points.extend(
+            [
+                (cur_left, cur_bottom),
+                (cur_left, cur_top),
+                (cur_right, cur_top),
+            ]
+        )
+        next_left = cur_left + 2 * spacing_m
+        next_right = cur_right - 2 * spacing_m
+        next_top = cur_top + 2 * spacing_m
+        next_bottom = cur_bottom - 2 * spacing_m
+
+        if next_right <= next_left or next_bottom <= next_top:
+            center_x = 0.5 * (cur_left + cur_right)
+            center_y = 0.5 * (cur_top + cur_bottom)
+            spiral_points.append((center_x, center_y))
+            break
+
+        spiral_points.extend(
+            [
+                (cur_right, next_bottom),
+                (next_right, next_bottom),
+            ]
+        )
+        cur_left, cur_right = next_left, next_right
+        cur_top, cur_bottom = next_top, next_bottom
+
+    inward = LineString(spiral_points)
+    if inward.length <= 0:
+        return None
+
+    rev = list(reversed(spiral_points))
+    n_rev = len(rev)
+    outward_points: List[Tuple[float, float]] = []
+    for i in range(n_rev):
+        x, y = rev[i][0], rev[i][1]
+        if i < n_rev - 1:
+            dx = rev[i + 1][0] - x
+            dy = rev[i + 1][1] - y
+        else:
+            dx = x - rev[i - 1][0]
+            dy = y - rev[i - 1][1]
+        length = (dx * dx + dy * dy) ** 0.5
+        if length > 1e-9:
+            nx = dy / length
+            ny = -dx / length
+            x += spacing_m * nx
+            y += spacing_m * ny
+        outward_points.append((x, y))
+    outward = LineString(outward_points)
+    full_path = LineString(list(inward.coords) + list(outward.coords))
+
+    total_path_len = full_path.length
+    if total_path_len <= 0:
+        return None
+
+    max_stub_one_way = 0.0
+    for x, y in full_path.coords:
+        d = math.hypot(x - manifold.position.x, y - manifold.position.y)
+        max_stub_one_way = max(max_stub_one_way, d)
+
+    if max_circuit_length_m > 0:
+        effective_room_max = max_circuit_length_m - 2.0 * max_stub_one_way
+        if effective_room_max <= 0:
+            required_circuits = 1
+        else:
+            required_circuits = max(
+                1, math.ceil(total_path_len / effective_room_max)
+            )
+    else:
+        required_circuits = 1
+
+    return (full_path, inward, total_path_len, max_stub_one_way, required_circuits)
+
+
+def get_spiral_required_circuits_for_zone(
+    zone: HeatingZone,
+    manifold: Manifold,
+    spacing_m: float,
+    max_circuit_length_m: float,
+    params: RoutingParams | None = None,
+) -> int:
+    """
+    Return the number of circuits required for this zone based on the full
+    spiral path length (inward + outward). Used to decide subzone count so
+    that subzone calculation is based on total length of one zone, not area.
+    """
+    if params is None:
+        params = RoutingParams()
+    result = _build_spiral_full_path(
+        zone, manifold, spacing_m, max_circuit_length_m, params
+    )
+    if result is None:
+        return 1
+    return result[4]  # required_circuits
+
+
 def split_zone_into_subzones(zone_geometry: Polygon, n: int) -> List[Polygon]:
     """
     Split a zone's geometry into n equal-area subzones (axis-aligned strips).
@@ -274,124 +407,13 @@ def plan_spiral_circuits_for_rectangle(
     if params is None:
         params = RoutingParams()
 
-    pts = zone.geometry.boundary.points
-    if len(pts) < 4:
+    result = _build_spiral_full_path(
+        zone, manifold, spacing_m, max_circuit_length_m, params
+    )
+    if result is None:
         return []
 
-    xs = [p.x for p in pts]
-    ys = [p.y for p in pts]
-    left, right = min(xs), max(xs)
-    top, bottom = min(ys), max(ys)
-
-    # Apply wall clearance.
-    left += params.wall_clearance_m
-    right -= params.wall_clearance_m
-    top += params.wall_clearance_m
-    bottom -= params.wall_clearance_m
-
-    if right <= left or bottom <= top:
-        return []
-
-    spiral_points: List[Tuple[float, float]] = []
-
-    cur_left, cur_right = left, right
-    cur_top, cur_bottom = top, bottom
-
-    # Start at outer top-left corner.
-    spiral_points.append((cur_left, cur_top))
-
-    # Build inward spiral rectangles with 2 * spacing between loops so that
-    # we can later place the return path in between them at final spacing.
-    while True:
-        # Walk the current rectangle perimeter almost closed (clockwise).
-        spiral_points.extend(
-            [
-                (cur_right, cur_top),
-                (cur_right, cur_bottom),
-                (cur_left, cur_bottom),
-            ]
-        )
-
-        # Move inward for the next loop using 2 * spacing.
-        next_left = cur_left + 2 * spacing_m
-        next_right = cur_right - 2 * spacing_m
-        next_top = cur_top + 2 * spacing_m
-        next_bottom = cur_bottom - 2 * spacing_m
-
-        # Connect to the next loop's start (its top-left).
-        if next_right <= next_left or next_bottom <= next_top:
-            break
-
-        spiral_points.extend(
-            [
-                (next_left, cur_bottom),
-                (next_left, next_top),
-            ]
-        )
-
-        cur_left, cur_right = next_left, next_right
-        cur_top, cur_bottom = next_top, next_bottom
-
-    # Build the inward spiral.
-    inward = LineString(spiral_points)
-    if inward.length <= 0:
-        return []
-
-    # Build an outward path that runs between the inward loops so that the
-    # distance between supply and return segments is approximately spacing_m.
-    offset = inward.parallel_offset(spacing_m, side="right", join_style=2)
-    if offset.is_empty:
-        # Fallback: simple reverse if offset fails for any reason.
-        outward = LineString(list(reversed(spiral_points)))
-        full_path = LineString(list(inward.coords) + list(outward.coords))
-    else:
-        # Handle LineString or MultiLineString from parallel_offset.
-        if isinstance(offset, LineString):
-            outward = offset
-        else:
-            geoms = list(offset.geoms)
-            if not geoms:
-                outward = LineString(list(reversed(spiral_points)))
-            else:
-                geoms.sort(key=lambda g: g.length, reverse=True)
-                outward = geoms[0]
-
-        inward_end = inward.coords[-1]
-        outward_coords = list(outward.coords)
-
-        # Orient outward so it starts nearest to the inward end.
-        def _sqdist(a, b):
-            return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
-
-        if _sqdist(inward_end, outward_coords[0]) > _sqdist(
-            inward_end, outward_coords[-1]
-        ):
-            outward_coords.reverse()
-
-        full_path = LineString(list(inward.coords) + outward_coords)
-
-    total_path_len = full_path.length
-    if total_path_len <= 0:
-        return []
-
-    # Approximate the one-way supply/return distance from manifold to the spiral
-    # path so that the max circuit length constraint applies to the whole loop,
-    # not just the in-room spiral portion.
-    man_point = ShapelyPoint(manifold.position.x, manifold.position.y)
-    approx_stub_one_way = full_path.distance(man_point)
-
-    if max_circuit_length_m > 0:
-        effective_room_max = max_circuit_length_m - 2.0 * approx_stub_one_way
-        if effective_room_max <= 0:
-            # Degenerate case: manifold is so far that we can't meaningfully
-            # allocate length to the room path; fall back to a single circuit.
-            required_circuits = 1
-        else:
-            required_circuits = max(
-                1, math.ceil(total_path_len / effective_room_max)
-            )
-    else:
-        required_circuits = 1
+    full_path, inward, total_path_len, _max_stub_one_way, required_circuits = result
 
     target_len = total_path_len / required_circuits
     circuit_lengths = [target_len for _ in range(required_circuits)]
@@ -428,6 +450,13 @@ def plan_spiral_circuits_for_rectangle(
             if d_along_full >= inward_len:
                 return_segment_indices.append(seg_idx)
 
+        # Total circuit length: simple spiral = two pipes (supply + return) at
+        # pipe spacing * 2 (bifilar), so in-zone length is already centerline * 2.
+        # Total = in_zone_both_pipes + 2*stub (same formula as max_circuit_length_m).
+        stub_one_way = min(dist_start, dist_end)
+        in_zone_both_pipes = float(circuit_path.length)  # supply + return (×2)
+        total_circuit_length = in_zone_both_pipes + 2.0 * stub_one_way
+
         circuit_id = (
             f"{zone.id}_sz{subzone_index}_spiral_c{idx+1}"
             if subzone_index is not None
@@ -444,7 +473,7 @@ def plan_spiral_circuits_for_rectangle(
                 spacing_m=spacing_m,
                 route=polyline,
                 return_segment_indices=return_segment_indices,
-                total_length_m=float(circuit_path.length),
+                total_length_m=total_circuit_length,
             )
         )
 

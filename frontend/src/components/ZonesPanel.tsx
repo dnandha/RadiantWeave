@@ -63,7 +63,7 @@ export const ZonesPanel: React.FC<Props> = ({
               const pipeSpacing = pipeSpacingByZoneId[z.id] ?? defaultPipeSpacingM;
               return (
               <tr key={z.id}>
-                <td>{z.name}</td>
+                <td className="panel-name-cell">{z.name}</td>
                 <td align="right">
                   <input
                     type="number"

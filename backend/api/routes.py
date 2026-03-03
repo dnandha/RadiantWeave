@@ -12,9 +12,10 @@ from ..models.circuit import Circuit
 from ..models.floorplan import Floorplan, Manifold, Polygon
 from ..models.heating_zone import HeatingZone
 from ..routing.path_planner import (
-    RoutingParams,
+    get_spiral_required_circuits_for_zone,
     plan_meander_circuits_for_zone,
     plan_spiral_circuits_for_rectangle,
+    RoutingParams,
     split_zone_into_subzones,
 )
 
@@ -142,7 +143,14 @@ def calculate_layout(
                 obstacles.extend(room.obstacles)
 
         routing_params = params.routing
-        n_circuits = sizing.circuit_count
+        # Subzone count based on full zone spiral length (total path length), not area.
+        n_circuits = get_spiral_required_circuits_for_zone(
+            zone=zone,
+            manifold=manifold,
+            spacing_m=sizing.spacing_m,
+            max_circuit_length_m=base_sizing.max_circuit_length_m,
+            params=routing_params or RoutingParams(),
+        )
 
         # If zone needs more than one circuit, split into N equal subzones (one circuit per subzone).
         if n_circuits > 1:

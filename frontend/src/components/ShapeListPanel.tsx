@@ -55,7 +55,7 @@ export const ShapeListPanel: React.FC<Props> = ({
             <tbody>
               {items.map((r) => (
                 <tr key={r.id}>
-                  <td>{r.name}</td>
+                  <td className="panel-name-cell">{r.name}</td>
                   <td align="right">
                     <input
                       type="number"
