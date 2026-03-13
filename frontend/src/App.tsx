@@ -5,6 +5,10 @@ import { DrawModeButtons, type DrawMode } from "./components/DrawModeButtons";
 import { HelpModal } from "./components/HelpModal";
 import { ShapeListPanel, type ShapeSummary } from "./components/ShapeListPanel";
 import { ZonesPanel } from "./components/ZonesPanel";
+import {
+  DEFAULT_PIPE_OUTER_DIAMETER_MM,
+  DEFAULT_PIPE_WALL_THICKNESS_MM
+} from "./pipeDefaults";
 import "./App.css";
 
 type Point = { x: number; y: number };
@@ -69,6 +73,10 @@ type Floor = {
   maxCircuitLengthM?: number;
   /** Pipe roll length in meters; used for roll assignment. */
   pipeRollLengthM?: number;
+  /** Pipe outer diameter in mm; used to calculate max circuit length. */
+  pipeOuterDiameterMm?: number;
+  /** Pipe wall thickness in mm; used with pipeOuterDiameterMm for max circuit length. */
+  pipeWallThicknessMm?: number;
 };
 
 type Layout = {
@@ -174,7 +182,9 @@ function newFloor(id: string, name: string): Floor {
     circuits: [],
     paths: [],
     maxCircuitLengthM: 60,
-    pipeRollLengthM: 200
+    pipeRollLengthM: 200,
+    pipeOuterDiameterMm: DEFAULT_PIPE_OUTER_DIAMETER_MM,
+    pipeWallThicknessMm: DEFAULT_PIPE_WALL_THICKNESS_MM
   };
 }
 
@@ -214,6 +224,10 @@ export const App: React.FC = () => {
   const [floorToDelete, setFloorToDelete] = useState<string | null>(null);
   const [circuitViewScope, setCircuitViewScope] = useState<"current-floor" | "all-floors">("current-floor");
   const [printMode, setPrintMode] = useState(false);
+  const [recommendedMaxCircuitLengthM, setRecommendedMaxCircuitLengthM] =
+    useState<number | null>(null);
+  const recommendationRequestIdRef = useRef(0);
+  const autoFillRecommendedMaxRef = useRef(false);
 
   const currentFloor = React.useMemo(
     () => floors.find((f) => f.id === currentFloorId) ?? floors[0]!,
@@ -226,6 +240,10 @@ export const App: React.FC = () => {
   const circuitInletOverrides = currentFloor.circuitInletOverrides;
   const circuits = currentFloor.circuits;
   const paths = currentFloor.paths;
+  const pipeOdMm =
+    currentFloor.pipeOuterDiameterMm ?? DEFAULT_PIPE_OUTER_DIAMETER_MM;
+  const pipeWallMm =
+    currentFloor.pipeWallThicknessMm ?? DEFAULT_PIPE_WALL_THICKNESS_MM;
 
   const {
     displayCircuits,
@@ -560,7 +578,12 @@ export const App: React.FC = () => {
               circuits: Array.isArray(f.circuits) ? f.circuits : [],
               paths: Array.isArray(f.paths) ? f.paths : [],
               maxCircuitLengthM: typeof f.maxCircuitLengthM === "number" ? f.maxCircuitLengthM : 60,
-              pipeRollLengthM: typeof f.pipeRollLengthM === "number" ? f.pipeRollLengthM : 200
+              pipeRollLengthM: typeof f.pipeRollLengthM === "number" ? f.pipeRollLengthM : 200,
+              pipeOuterDiameterMm: typeof f.pipeOuterDiameterMm === "number" ? f.pipeOuterDiameterMm : DEFAULT_PIPE_OUTER_DIAMETER_MM,
+              pipeWallThicknessMm:
+                typeof f.pipeWallThicknessMm === "number"
+                  ? f.pipeWallThicknessMm
+                  : DEFAULT_PIPE_WALL_THICKNESS_MM
             }))
           );
           if (parsed.currentFloorId && parsed.floors.some((f: any) => f.id === parsed.currentFloorId)) {
@@ -591,7 +614,12 @@ export const App: React.FC = () => {
             circuits: [] as CircuitRow[],
             paths: [] as CircuitPath[],
             maxCircuitLengthM: typeof (parsed as any).maxCircuitLengthM === "number" ? (parsed as any).maxCircuitLengthM : 60,
-            pipeRollLengthM: typeof (parsed as any).pipeRollLengthM === "number" ? (parsed as any).pipeRollLengthM : 200
+            pipeRollLengthM: typeof (parsed as any).pipeRollLengthM === "number" ? (parsed as any).pipeRollLengthM : 200,
+            pipeOuterDiameterMm: typeof (parsed as any).pipeOuterDiameterMm === "number" ? (parsed as any).pipeOuterDiameterMm : DEFAULT_PIPE_OUTER_DIAMETER_MM,
+            pipeWallThicknessMm:
+              typeof (parsed as any).pipeWallThicknessMm === "number"
+                ? (parsed as any).pipeWallThicknessMm
+                : DEFAULT_PIPE_WALL_THICKNESS_MM
           };
           setFloors((prev) =>
             prev.some((f) => f.id === currentId)
@@ -658,6 +686,53 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (drawMode !== "add-connection") setConnectionDrawing(null);
   }, [drawMode]);
+
+  useEffect(() => {
+    const requestId = ++recommendationRequestIdRef.current;
+    const shouldAutoFill = autoFillRecommendedMaxRef.current;
+    autoFillRecommendedMaxRef.current = false;
+    const params = new URLSearchParams({
+      pipe_outer_diameter_mm: String(pipeOdMm),
+      pipe_wall_thickness_mm: String(pipeWallMm)
+    });
+
+    void (async () => {
+      try {
+        const response = await fetch(
+          `http://localhost:8000/hydraulics/max-circuit-length?${params.toString()}`
+        );
+        if (!response.ok) {
+          if (recommendationRequestIdRef.current === requestId) {
+            setRecommendedMaxCircuitLengthM(null);
+          }
+          return;
+        }
+
+        const data = await response.json();
+        if (recommendationRequestIdRef.current !== requestId) return;
+
+        const recommended =
+          typeof data.max_circuit_length_m === "number"
+            ? data.max_circuit_length_m
+            : null;
+        setRecommendedMaxCircuitLengthM(recommended);
+
+        if (shouldAutoFill && recommended != null) {
+          setFloors((prev) =>
+            prev.map((floor) =>
+              floor.id === currentFloorId
+                ? { ...floor, maxCircuitLengthM: recommended }
+                : floor
+            )
+          );
+        }
+      } catch {
+        if (recommendationRequestIdRef.current === requestId) {
+          setRecommendedMaxCircuitLengthM(null);
+        }
+      }
+    })();
+  }, [currentFloorId, pipeOdMm, pipeWallMm]);
 
   const findContainingRoomId = (point: Point): string | undefined => {
     for (const room of rooms) {
@@ -1048,6 +1123,20 @@ export const App: React.FC = () => {
     updateCurrentFloor({ maxCircuitLengthM: value });
   };
 
+  const handlePipeOuterDiameterChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const value = Number(e.target.value);
+    if (!Number.isFinite(value) || value <= 0) return;
+    autoFillRecommendedMaxRef.current = true;
+    updateCurrentFloor({ pipeOuterDiameterMm: value });
+  };
+
+  const handlePipeWallThicknessChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const value = Number(e.target.value);
+    if (!Number.isFinite(value) || value < 0) return;
+    autoFillRecommendedMaxRef.current = true;
+    updateCurrentFloor({ pipeWallThicknessMm: value });
+  };
+
   const handlePipeRollLengthChange = (e: ChangeEvent<HTMLInputElement>) => {
     const value = Number(e.target.value);
     if (!Number.isFinite(value) || value <= 0) return;
@@ -1159,7 +1248,10 @@ export const App: React.FC = () => {
     const params = {
       pipe_spacing_m: pipeSpacingM,
       pipe_spacing_by_zone_id,
-      max_circuit_length_m: currentFloor.maxCircuitLengthM ?? 60
+      max_circuit_length_m: currentFloor.maxCircuitLengthM ?? 60,
+      pipe_outer_diameter_mm: currentFloor.pipeOuterDiameterMm ?? DEFAULT_PIPE_OUTER_DIAMETER_MM,
+      pipe_wall_thickness_mm:
+        currentFloor.pipeWallThicknessMm ?? DEFAULT_PIPE_WALL_THICKNESS_MM
     };
 
     try {
@@ -1245,7 +1337,12 @@ export const App: React.FC = () => {
               circuits: Array.isArray(f.circuits) ? f.circuits : [],
               paths: Array.isArray(f.paths) ? f.paths : [],
               maxCircuitLengthM: typeof f.maxCircuitLengthM === "number" ? f.maxCircuitLengthM : 60,
-              pipeRollLengthM: typeof f.pipeRollLengthM === "number" ? f.pipeRollLengthM : 200
+              pipeRollLengthM: typeof f.pipeRollLengthM === "number" ? f.pipeRollLengthM : 200,
+              pipeOuterDiameterMm: typeof f.pipeOuterDiameterMm === "number" ? f.pipeOuterDiameterMm : DEFAULT_PIPE_OUTER_DIAMETER_MM,
+              pipeWallThicknessMm:
+                typeof f.pipeWallThicknessMm === "number"
+                  ? f.pipeWallThicknessMm
+                  : DEFAULT_PIPE_WALL_THICKNESS_MM
             }))
           );
           setCurrentFloorId(
@@ -1268,7 +1365,9 @@ export const App: React.FC = () => {
             circuits: [] as CircuitRow[],
             paths: [] as CircuitPath[],
             maxCircuitLengthM: 60,
-            pipeRollLengthM: 200
+            pipeRollLengthM: 200,
+            pipeOuterDiameterMm: DEFAULT_PIPE_OUTER_DIAMETER_MM,
+            pipeWallThicknessMm: DEFAULT_PIPE_WALL_THICKNESS_MM
           };
           setFloors((prev) => {
             const hasCurrent = prev.some((f) => f.id === currentId);
@@ -1329,7 +1428,12 @@ export const App: React.FC = () => {
               circuits: Array.isArray(f.circuits) ? f.circuits : [],
               paths: Array.isArray(f.paths) ? f.paths : [],
               maxCircuitLengthM: typeof f.maxCircuitLengthM === "number" ? f.maxCircuitLengthM : 60,
-              pipeRollLengthM: typeof f.pipeRollLengthM === "number" ? f.pipeRollLengthM : 200
+              pipeRollLengthM: typeof f.pipeRollLengthM === "number" ? f.pipeRollLengthM : 200,
+              pipeOuterDiameterMm: typeof f.pipeOuterDiameterMm === "number" ? f.pipeOuterDiameterMm : DEFAULT_PIPE_OUTER_DIAMETER_MM,
+              pipeWallThicknessMm:
+                typeof f.pipeWallThicknessMm === "number"
+                  ? f.pipeWallThicknessMm
+                  : DEFAULT_PIPE_WALL_THICKNESS_MM
             }));
             firstNewId = newFloors[0]!.id;
             return [...prev, ...newFloors];
@@ -1355,7 +1459,9 @@ export const App: React.FC = () => {
               circuits: [],
               paths: [],
               maxCircuitLengthM: 60,
-              pipeRollLengthM: 200
+              pipeRollLengthM: 200,
+              pipeOuterDiameterMm: DEFAULT_PIPE_OUTER_DIAMETER_MM,
+              pipeWallThicknessMm: DEFAULT_PIPE_WALL_THICKNESS_MM
             }
           ]);
           setCurrentFloorId(id);
@@ -1787,7 +1893,32 @@ export const App: React.FC = () => {
           <span className="app-toolbar-row__label">Circuits</span>
           <div className="app-toolbar-group">
             <label>
-              <span>Max length (m):</span>
+              <span>Pipe OD (mm):</span>
+              <input
+                type="number"
+                min={1}
+                step={0.5}
+                value={pipeOdMm}
+                onChange={handlePipeOuterDiameterChange}
+              />
+            </label>
+            <label>
+              <span>Wall (mm):</span>
+              <input
+                type="number"
+                min={0}
+                step={0.5}
+                value={pipeWallMm}
+                onChange={handlePipeWallThicknessChange}
+              />
+            </label>
+            <label>
+              <span>
+                Max length (m){" "}
+                {recommendedMaxCircuitLengthM != null &&
+                  `(calc: ${Math.round(recommendedMaxCircuitLengthM)} m)`}
+                :
+              </span>
               <input
                 type="number"
                 min={1}
@@ -1806,9 +1937,6 @@ export const App: React.FC = () => {
                 onChange={handlePipeRollLengthChange}
               />
             </label>
-            <button type="button" onClick={handlePrint}>
-              Print
-            </button>
           </div>
         </div>
       </div>
@@ -1950,13 +2078,18 @@ export const App: React.FC = () => {
         </div>
 
         <aside className="app-sidebar">
-          <button
-            type="button"
-            onClick={handleCalculateCircuits}
-            className="calculate-btn"
-          >
-            Calculate circuits
-          </button>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <button
+              type="button"
+              onClick={handleCalculateCircuits}
+              className="calculate-btn"
+            >
+              Calculate circuits
+            </button>
+            <button type="button" onClick={handlePrint}>
+              Print
+            </button>
+          </div>
           <div className="panel">
             <div className="panel-title" style={{ marginBottom: 8 }}>
               <span>Circuits</span>

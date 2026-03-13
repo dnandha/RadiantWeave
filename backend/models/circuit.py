@@ -5,6 +5,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
+from ..en1264.hydraulics import DEFAULT_PIPE_OUTER_DIAMETER_MM
 from .floorplan import Polyline
 
 
@@ -27,7 +28,7 @@ class Circuit(BaseModel):
         description="0-based index of the subzone within the zone when zone is split into multiple circuits.",
     )
 
-    pipe_outer_diameter_mm: float = 16.0
+    pipe_outer_diameter_mm: float = DEFAULT_PIPE_OUTER_DIAMETER_MM
     pipe_material: PipeMaterial = PipeMaterial.PEX
     spacing_m: float = Field(
         0.15,

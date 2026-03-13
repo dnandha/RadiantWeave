@@ -5,12 +5,13 @@ from dataclasses import dataclass
 from typing import List
 
 from ..models.heating_zone import HeatingZone
+from .hydraulics import DEFAULT_PIPE_OUTER_DIAMETER_MM
 from .thermal_load import estimate_zone_area, compute_design_heat_load
 
 
 @dataclass
 class CircuitSizingParams:
-    pipe_outer_diameter_mm: float = 16.0
+    pipe_outer_diameter_mm: float = DEFAULT_PIPE_OUTER_DIAMETER_MM
     max_circuit_length_m: float = 100.0
     spacing_options_m: tuple = (0.10, 0.15, 0.20)
     # Optional explicit spacing override supplied by the caller. When set,

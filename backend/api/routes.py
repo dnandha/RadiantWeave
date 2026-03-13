@@ -7,6 +7,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from ..en1264.circuit_sizing import CircuitSizingParams, size_zone_circuits
+from ..en1264.hydraulics import (
+    DEFAULT_PIPE_WALL_THICKNESS_MM,
+    calculate_max_circuit_length_m,
+)
 from ..en1264.thermal_load import ZoneThermalResult, evaluate_zone_thermal_feasibility
 from ..models.circuit import Circuit
 from ..models.floorplan import Floorplan, Manifold, Polygon
@@ -43,12 +47,18 @@ class CalculationParams(BaseModel):
     pipe_spacing_m: float | None = None
     pipe_spacing_by_zone_id: dict[str, float] | None = None
     max_circuit_length_m: float | None = None
+    pipe_outer_diameter_mm: float | None = None
+    pipe_wall_thickness_mm: float | None = None
 
 
 class CalculationResult(BaseModel):
     thermal: List[ZoneThermalResult]
     sizing: List[dict]
     circuits: List[Circuit]
+
+
+class MaxCircuitLengthResult(BaseModel):
+    max_circuit_length_m: float
 
 
 def _polygon_bounds_center(poly: Polygon) -> Tuple[float, float]:
@@ -60,6 +70,19 @@ def _polygon_bounds_center(poly: Polygon) -> Tuple[float, float]:
     min_x, max_x = min(xs), max(xs)
     min_y, max_y = min(ys), max(ys)
     return (min_x + max_x) / 2.0, (min_y + max_y) / 2.0
+
+
+@app.get("/hydraulics/max-circuit-length", response_model=MaxCircuitLengthResult)
+def get_max_circuit_length(
+    pipe_outer_diameter_mm: float,
+    pipe_wall_thickness_mm: float = DEFAULT_PIPE_WALL_THICKNESS_MM,
+) -> MaxCircuitLengthResult:
+    return MaxCircuitLengthResult(
+        max_circuit_length_m=calculate_max_circuit_length_m(
+            pipe_outer_diameter_mm=pipe_outer_diameter_mm,
+            pipe_wall_thickness_mm=pipe_wall_thickness_mm,
+        )
+    )
 
 
 @app.post("/projects/calculate", response_model=CalculationResult)
@@ -84,8 +107,16 @@ def calculate_layout(
 
     # Circuit sizing: support per-zone pipe spacing.
     base_sizing = params.sizing or CircuitSizingParams()
+    if params.pipe_outer_diameter_mm is not None:
+        base_sizing.pipe_outer_diameter_mm = params.pipe_outer_diameter_mm
     if params.max_circuit_length_m is not None:
         base_sizing.max_circuit_length_m = params.max_circuit_length_m
+    elif params.pipe_outer_diameter_mm is not None:
+        base_sizing.max_circuit_length_m = calculate_max_circuit_length_m(
+            pipe_outer_diameter_mm=params.pipe_outer_diameter_mm,
+            pipe_wall_thickness_mm=params.pipe_wall_thickness_mm
+            or DEFAULT_PIPE_WALL_THICKNESS_MM,
+        )
     spacing_by_zone = params.pipe_spacing_by_zone_id or {}
 
     sizing_results = []
