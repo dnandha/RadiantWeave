@@ -33,6 +33,8 @@ type Props = {
   tempZone?: ZonePath | null;
   pixelsPerMeter: number;
   drawMode?: string;
+  /** When true, shifts content so its top-left bounds start at the canvas origin. Useful for printing. */
+  alignTopLeft?: boolean;
   onCanvasClick?: (pointMeters: Point) => void;
   onCanvasMouseDown?: (pointMeters: Point) => void;
   onCanvasMove?: (pointMeters: Point) => void;
@@ -114,6 +116,7 @@ export const FloorplanCanvas = forwardRef<FloorplanCanvasHandle, Props>(function
   tempZone,
   pixelsPerMeter,
   drawMode = "create-room",
+  alignTopLeft = false,
   onCanvasClick,
   onCanvasMouseDown,
   onCanvasMove,
@@ -225,6 +228,28 @@ export const FloorplanCanvas = forwardRef<FloorplanCanvasHandle, Props>(function
     contentHeightPx != null && contentHeightPx > 0
       ? `max(80vh, ${canvasMinHeight}px, ${contentHeightPx + 80}px)`
       : `max(80vh, ${canvasMinHeight}px)`;
+
+  const alignOffsetPx: Point = useMemo(() => {
+    if (!alignTopLeft) return { x: 0, y: 0 };
+    const bounds = getContentBoundsMeters();
+    if (!bounds) return { x: 0, y: 0 };
+    const marginPx = 8;
+    return {
+      x: -bounds.minX * pixelsPerMeter + marginPx,
+      y: -bounds.minY * pixelsPerMeter + marginPx
+    };
+  }, [
+    alignTopLeft,
+    rooms,
+    zones,
+    circuits,
+    manifolds,
+    tempRoom,
+    tempZone,
+    connectionDrawing,
+    manifoldConnections,
+    pixelsPerMeter
+  ]);
 
   const handleClick = (e: MouseEvent<HTMLDivElement>) => {
     const p = toPoint(e.clientX, e.clientY);
@@ -340,7 +365,7 @@ export const FloorplanCanvas = forwardRef<FloorplanCanvasHandle, Props>(function
           overflow: "visible"
         }}
       >
-        <g transform={`translate(${pan.x}, ${pan.y})`}>
+        <g transform={`translate(${pan.x + alignOffsetPx.x}, ${pan.y + alignOffsetPx.y})`}>
         {manifolds.map((m) => {
           const isMoveManifold = drawMode === "move-manifold";
           return (
@@ -558,7 +583,7 @@ export const FloorplanCanvas = forwardRef<FloorplanCanvasHandle, Props>(function
         })()}
         {manifoldConnections.map((conn, i) => (
           <path
-            key={`conn-${conn.circuitId}-${conn.type}-${i}`}
+            key={`conn-${conn.circuitId}-${i}`}
             d={toSvgPath(conn.points)}
             stroke="#64748b"
             strokeWidth={1.5}

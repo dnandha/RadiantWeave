@@ -131,7 +131,13 @@ export const ZonesPanel: React.FC<Props> = ({
                       setEditingValue(Number.isFinite(z.width) ? z.width.toFixed(2) : "");
                     }}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                      if (editingKey === `${z.id}-width`) setEditingValue(e.target.value);
+                      const v = e.target.value;
+                      if (editingKey === `${z.id}-width`) {
+                        setEditingValue(v);
+                      } else {
+                        const n = Number(v);
+                        if (Number.isFinite(n) && n >= 0) onDimensionChange(z.id, "width", n);
+                      }
                     }}
                     onBlur={() => {
                       if (editingKey === `${z.id}-width`) {
@@ -160,7 +166,13 @@ export const ZonesPanel: React.FC<Props> = ({
                       setEditingValue(Number.isFinite(z.height) ? z.height.toFixed(2) : "");
                     }}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                      if (editingKey === `${z.id}-height`) setEditingValue(e.target.value);
+                      const v = e.target.value;
+                      if (editingKey === `${z.id}-height`) {
+                        setEditingValue(v);
+                      } else {
+                        const n = Number(v);
+                        if (Number.isFinite(n) && n >= 0) onDimensionChange(z.id, "height", n);
+                      }
                     }}
                     onBlur={() => {
                       if (editingKey === `${z.id}-height`) {
@@ -189,7 +201,13 @@ export const ZonesPanel: React.FC<Props> = ({
                       setEditingValue(Number.isFinite(pipeSpacing) ? pipeSpacing.toFixed(2) : "");
                     }}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                      if (editingKey === `${z.id}-pipe`) setEditingValue(e.target.value);
+                      const val = e.target.value;
+                      if (editingKey === `${z.id}-pipe`) {
+                        setEditingValue(val);
+                      } else {
+                        const n = Number(val);
+                        if (Number.isFinite(n) && n > 0) onPipeSpacingChange(z.id, n);
+                      }
                     }}
                     onBlur={() => {
                       if (editingKey === `${z.id}-pipe`) {

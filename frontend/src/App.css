@@ -822,6 +822,24 @@
   background: #991b1b;
 }
 
+.print-section {
+  display: none;
+}
+
+.print-floor-canvas-wrapper {
+  margin-top: 0.75rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.5rem;
+}
+
+.print-summary-section {
+  margin-top: 2rem;
+}
+
+.print-summary-card {
+  margin-top: 1rem;
+}
+
 @media (max-width: 960px) {
   .app-root {
     padding: 1rem;
@@ -833,5 +851,33 @@
 
   .app-toolbar {
     align-items: flex-start;
+  }
+}
+
+@media print {
+  .app-root > *:not(.print-section) {
+    display: none !important;
+  }
+
+  .print-section {
+    display: block !important;
+    padding: 0.5in;
+  }
+
+  .print-floor-section {
+    page-break-after: always;
+  }
+
+  .print-floor-section:last-of-type {
+    page-break-after: avoid;
+  }
+
+  .print-section table {
+    width: 100%;
+    font-size: 11px;
+  }
+
+  .print-section svg {
+    max-width: 100%;
   }
 }

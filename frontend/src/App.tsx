@@ -67,6 +67,8 @@ type Floor = {
   paths: CircuitPath[];
   /** Max circuit length in meters; used when calculating circuits for this floor. */
   maxCircuitLengthM?: number;
+  /** Pipe roll length in meters; used for roll assignment. */
+  pipeRollLengthM?: number;
 };
 
 type Layout = {
@@ -171,7 +173,8 @@ function newFloor(id: string, name: string): Floor {
     circuitInletOverrides: {},
     circuits: [],
     paths: [],
-    maxCircuitLengthM: 60
+    maxCircuitLengthM: 60,
+    pipeRollLengthM: 200
   };
 }
 
@@ -209,6 +212,8 @@ export const App: React.FC = () => {
   const [editingFloor, setEditingFloor] = useState<{ id: string; name: string } | null>(null);
   const editingFloorInputRef = useRef<HTMLInputElement>(null);
   const [floorToDelete, setFloorToDelete] = useState<string | null>(null);
+  const [circuitViewScope, setCircuitViewScope] = useState<"current-floor" | "all-floors">("current-floor");
+  const [printMode, setPrintMode] = useState(false);
 
   const currentFloor = React.useMemo(
     () => floors.find((f) => f.id === currentFloorId) ?? floors[0]!,
@@ -221,6 +226,95 @@ export const App: React.FC = () => {
   const circuitInletOverrides = currentFloor.circuitInletOverrides;
   const circuits = currentFloor.circuits;
   const paths = currentFloor.paths;
+
+  const {
+    displayCircuits,
+    displayManifoldConnections,
+    displayManifolds,
+    displayPipeRollLengthM
+  } = React.useMemo(() => {
+    if (circuitViewScope !== "all-floors" || floors.length === 0) {
+      return {
+        displayCircuits: circuits,
+        displayManifoldConnections: manifoldConnections,
+        displayManifolds: manifolds,
+        displayPipeRollLengthM: currentFloor.pipeRollLengthM ?? 200
+      };
+    }
+    const combinedCircuits: (CircuitRow & { floorId?: string; floorName?: string })[] = floors.flatMap(
+      (f) =>
+        f.circuits.map((c) => ({
+          ...c,
+          id: `${f.id}-${c.id}`,
+          floorId: f.id,
+          floorName: f.name
+        }))
+    );
+    const combinedManifoldConnections: ManifoldConnection[] = floors.flatMap((f) =>
+      f.manifoldConnections.map((conn) => ({
+        circuitId: `${f.id}-${conn.circuitId}`,
+        manifoldId: conn.manifoldId != null ? `${f.id}-${conn.manifoldId}` : undefined,
+        points: conn.points ?? []
+      }))
+    );
+    const combinedManifolds: ManifoldItem[] = floors.flatMap((f) =>
+      (f.manifolds ?? []).map((m) => ({
+        id: `${f.id}-${m.id}`,
+        position: m.position,
+        name: m.name ?? `${f.name} manifold`
+      }))
+    );
+    const rollM = floors[0]?.pipeRollLengthM ?? 200;
+    return {
+      displayCircuits: combinedCircuits,
+      displayManifoldConnections: combinedManifoldConnections,
+      displayManifolds: combinedManifolds,
+      displayPipeRollLengthM: rollM
+    };
+  }, [
+    circuitViewScope,
+    floors,
+    circuits,
+    manifoldConnections,
+    manifolds,
+    currentFloor.pipeRollLengthM
+  ]);
+
+  const printData = React.useMemo(() => {
+    if (!printMode || floors.length === 0) return null;
+
+    const combinedCircuits: (CircuitRow & { floorId?: string; floorName?: string })[] = floors.flatMap(
+      (f) =>
+        f.circuits.map((c) => ({
+          ...c,
+          id: `${f.id}-${c.id}`,
+          floorId: f.id,
+          floorName: f.name
+        }))
+    );
+    const combinedManifoldConnections: ManifoldConnection[] = floors.flatMap((f) =>
+      f.manifoldConnections.map((conn) => ({
+        circuitId: `${f.id}-${conn.circuitId}`,
+        manifoldId: conn.manifoldId != null ? `${f.id}-${conn.manifoldId}` : undefined,
+        points: conn.points ?? []
+      }))
+    );
+    const combinedManifolds: ManifoldItem[] = floors.flatMap((f) =>
+      (f.manifolds ?? []).map((m) => ({
+        id: `${f.id}-${m.id}`,
+        position: m.position,
+        name: m.name ?? `${f.name} manifold`
+      }))
+    );
+    const rollM = floors[0]?.pipeRollLengthM ?? 200;
+
+    return {
+      combinedCircuits,
+      combinedManifoldConnections,
+      combinedManifolds,
+      rollM
+    };
+  }, [printMode, floors]);
 
   const updateCurrentFloor = React.useCallback(
     (patch: Partial<Floor>) => {
@@ -315,6 +409,25 @@ export const App: React.FC = () => {
     },
     [currentFloorId]
   );
+
+  const handlePrint = React.useCallback(() => {
+    if (typeof window === "undefined") return;
+    setPrintMode(true);
+    window.setTimeout(() => {
+      window.print();
+    }, 50);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handleAfterPrint = () => {
+      setPrintMode(false);
+    };
+    window.addEventListener("afterprint", handleAfterPrint);
+    return () => {
+      window.removeEventListener("afterprint", handleAfterPrint);
+    };
+  }, []);
 
   const handleCenterPlan = () => {
     const result = canvasRef.current?.getCenterPlanOffset();
@@ -446,7 +559,8 @@ export const App: React.FC = () => {
                   : {},
               circuits: Array.isArray(f.circuits) ? f.circuits : [],
               paths: Array.isArray(f.paths) ? f.paths : [],
-              maxCircuitLengthM: typeof f.maxCircuitLengthM === "number" ? f.maxCircuitLengthM : 60
+              maxCircuitLengthM: typeof f.maxCircuitLengthM === "number" ? f.maxCircuitLengthM : 60,
+              pipeRollLengthM: typeof f.pipeRollLengthM === "number" ? f.pipeRollLengthM : 200
             }))
           );
           if (parsed.currentFloorId && parsed.floors.some((f: any) => f.id === parsed.currentFloorId)) {
@@ -476,7 +590,8 @@ export const App: React.FC = () => {
                 : {},
             circuits: [] as CircuitRow[],
             paths: [] as CircuitPath[],
-            maxCircuitLengthM: typeof (parsed as any).maxCircuitLengthM === "number" ? (parsed as any).maxCircuitLengthM : 60
+            maxCircuitLengthM: typeof (parsed as any).maxCircuitLengthM === "number" ? (parsed as any).maxCircuitLengthM : 60,
+            pipeRollLengthM: typeof (parsed as any).pipeRollLengthM === "number" ? (parsed as any).pipeRollLengthM : 200
           };
           setFloors((prev) =>
             prev.some((f) => f.id === currentId)
@@ -933,6 +1048,12 @@ export const App: React.FC = () => {
     updateCurrentFloor({ maxCircuitLengthM: value });
   };
 
+  const handlePipeRollLengthChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const value = Number(e.target.value);
+    if (!Number.isFinite(value) || value <= 0) return;
+    updateCurrentFloor({ pipeRollLengthM: value });
+  };
+
   const handleSaveLayout = () => {
     const layout: Layout = {
       pixelsPerMeter,
@@ -1123,7 +1244,8 @@ export const App: React.FC = () => {
                   : {},
               circuits: Array.isArray(f.circuits) ? f.circuits : [],
               paths: Array.isArray(f.paths) ? f.paths : [],
-              maxCircuitLengthM: typeof f.maxCircuitLengthM === "number" ? f.maxCircuitLengthM : 60
+              maxCircuitLengthM: typeof f.maxCircuitLengthM === "number" ? f.maxCircuitLengthM : 60,
+              pipeRollLengthM: typeof f.pipeRollLengthM === "number" ? f.pipeRollLengthM : 200
             }))
           );
           setCurrentFloorId(
@@ -1145,7 +1267,8 @@ export const App: React.FC = () => {
                 : {},
             circuits: [] as CircuitRow[],
             paths: [] as CircuitPath[],
-            maxCircuitLengthM: 60
+            maxCircuitLengthM: 60,
+            pipeRollLengthM: 200
           };
           setFloors((prev) => {
             const hasCurrent = prev.some((f) => f.id === currentId);
@@ -1205,7 +1328,8 @@ export const App: React.FC = () => {
                   : {},
               circuits: Array.isArray(f.circuits) ? f.circuits : [],
               paths: Array.isArray(f.paths) ? f.paths : [],
-              maxCircuitLengthM: typeof f.maxCircuitLengthM === "number" ? f.maxCircuitLengthM : 60
+              maxCircuitLengthM: typeof f.maxCircuitLengthM === "number" ? f.maxCircuitLengthM : 60,
+              pipeRollLengthM: typeof f.pipeRollLengthM === "number" ? f.pipeRollLengthM : 200
             }));
             firstNewId = newFloors[0]!.id;
             return [...prev, ...newFloors];
@@ -1230,7 +1354,8 @@ export const App: React.FC = () => {
                   : {},
               circuits: [],
               paths: [],
-              maxCircuitLengthM: 60
+              maxCircuitLengthM: 60,
+              pipeRollLengthM: 200
             }
           ]);
           setCurrentFloorId(id);
@@ -1666,11 +1791,24 @@ export const App: React.FC = () => {
               <input
                 type="number"
                 min={1}
-                step={1}
+                step={0.01}
                 value={currentFloor.maxCircuitLengthM ?? 60}
                 onChange={handleMaxCircuitLengthChange}
               />
             </label>
+            <label>
+              <span>Pipe roll length (m):</span>
+              <input
+                type="number"
+                min={1}
+                step={0.01}
+                value={currentFloor.pipeRollLengthM ?? 200}
+                onChange={handlePipeRollLengthChange}
+              />
+            </label>
+            <button type="button" onClick={handlePrint}>
+              Print
+            </button>
           </div>
         </div>
       </div>
@@ -1706,6 +1844,7 @@ export const App: React.FC = () => {
                     type="number"
                     value={pixelsPerMeter}
                     min={1}
+                step={0.01}
                     onChange={handlePixelsPerMeterChange}
                   />
                 </label>
@@ -1818,7 +1957,43 @@ export const App: React.FC = () => {
           >
             Calculate circuits
           </button>
-          <CircuitsTotalsCard circuits={circuits} manifoldConnections={manifoldConnections} manifolds={manifolds} />
+          <div className="panel">
+            <div className="panel-title" style={{ marginBottom: 8 }}>
+              <span>Circuits</span>
+              <div style={{ display: "flex", gap: 4 }}>
+                <button
+                  type="button"
+                  className={circuitViewScope === "current-floor" ? "panel-title-btn" : undefined}
+                  style={
+                    circuitViewScope === "current-floor"
+                      ? { fontWeight: 600 }
+                      : { background: "transparent", border: "1px solid #ccc" }
+                  }
+                  onClick={() => setCircuitViewScope("current-floor")}
+                >
+                  Current floor
+                </button>
+                <button
+                  type="button"
+                  className={circuitViewScope === "all-floors" ? "panel-title-btn" : undefined}
+                  style={
+                    circuitViewScope === "all-floors"
+                      ? { fontWeight: 600 }
+                      : { background: "transparent", border: "1px solid #ccc" }
+                  }
+                  onClick={() => setCircuitViewScope("all-floors")}
+                >
+                  All floors
+                </button>
+              </div>
+            </div>
+            <CircuitsTotalsCard
+              circuits={displayCircuits}
+              manifoldConnections={displayManifoldConnections}
+              manifolds={displayManifolds}
+              pipeRollLengthM={displayPipeRollLengthM}
+            />
+          </div>
           <div className="panel">
             <ShapeListPanel
             title="Rooms (dimensions in meters)"
@@ -1854,7 +2029,11 @@ export const App: React.FC = () => {
           </div>
 
           <div className="panel">
-            <CircuitSummary circuits={circuits} manifoldConnections={manifoldConnections} />
+            <CircuitSummary
+              circuits={displayCircuits}
+              manifoldConnections={displayManifoldConnections}
+              pipeRollLengthM={displayPipeRollLengthM}
+            />
           </div>
 
           <div className="panel">
@@ -1942,6 +2121,7 @@ export const App: React.FC = () => {
                       <input
                         type="number"
                         style={{ width: 64 }}
+                        step={0.01}
                         value={m.position.x}
                         onChange={(e) => {
                           const n = Number(e.target.value);
@@ -1954,6 +2134,7 @@ export const App: React.FC = () => {
                       <input
                         type="number"
                         style={{ width: 64 }}
+                        step={0.01}
                         value={m.position.y}
                         onChange={(e) => {
                           const n = Number(e.target.value);
@@ -1976,6 +2157,49 @@ export const App: React.FC = () => {
           </div>
         </aside>
       </main>
+      {printMode && (
+        <div className="print-section">
+          {floors.map((floor) => (
+            <section key={floor.id} className="print-floor-section">
+              <h2>{floor.name}</h2>
+              <div className="print-floor-canvas-wrapper">
+                <FloorplanCanvas
+                  circuits={floor.paths}
+                  rooms={floor.rooms}
+                  zones={floor.zones}
+                  tempRoom={null}
+                  tempZone={null}
+                  pixelsPerMeter={pixelsPerMeter}
+                  alignTopLeft
+                  manifolds={floor.manifolds ?? []}
+                  manifoldConnections={floor.manifoldConnections}
+                  circuitInletOverrides={floor.circuitInletOverrides}
+                />
+              </div>
+            </section>
+          ))}
+          {printData && (
+            <section className="print-summary-section">
+              <h2>Circuits summary (all floors)</h2>
+              <div className="print-summary-card">
+                <CircuitsTotalsCard
+                  circuits={printData.combinedCircuits}
+                  manifoldConnections={printData.combinedManifoldConnections}
+                  manifolds={printData.combinedManifolds}
+                  pipeRollLengthM={printData.rollM}
+                />
+              </div>
+              <div className="print-summary-card">
+                <CircuitSummary
+                  circuits={printData.combinedCircuits}
+                  manifoldConnections={printData.combinedManifoldConnections}
+                  pipeRollLengthM={printData.rollM}
+                />
+              </div>
+            </section>
+          )}
+        </div>
+      )}
     </div>
   );
 };

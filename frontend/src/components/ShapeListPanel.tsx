@@ -123,7 +123,13 @@ export const ShapeListPanel: React.FC<Props> = ({
                         setEditingValue(Number.isFinite(r.width) ? r.width.toFixed(2) : "");
                       }}
                       onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                        if (editingKey === `${r.id}-width`) setEditingValue(e.target.value);
+                        const v = e.target.value;
+                        if (editingKey === `${r.id}-width`) {
+                          setEditingValue(v);
+                        } else {
+                          const n = Number(v);
+                          if (Number.isFinite(n) && n >= 0) onDimensionChange(r.id, "width", n);
+                        }
                       }}
                       onBlur={() => {
                         if (editingKey === `${r.id}-width`) {
@@ -152,7 +158,13 @@ export const ShapeListPanel: React.FC<Props> = ({
                         setEditingValue(Number.isFinite(r.height) ? r.height.toFixed(2) : "");
                       }}
                       onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                        if (editingKey === `${r.id}-height`) setEditingValue(e.target.value);
+                        const v = e.target.value;
+                        if (editingKey === `${r.id}-height`) {
+                          setEditingValue(v);
+                        } else {
+                          const n = Number(v);
+                          if (Number.isFinite(n) && n >= 0) onDimensionChange(r.id, "height", n);
+                        }
                       }}
                       onBlur={() => {
                         if (editingKey === `${r.id}-height`) {
